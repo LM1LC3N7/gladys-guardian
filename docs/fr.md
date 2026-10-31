@@ -79,8 +79,9 @@ en défaut : 3 fois rapidement (chaque envoi accepté par le contrôleur, à
 2,4 s d'intervalle) ; puis, retenu, toutes les 30 secondes, puis de plus en
 plus espacé (10 minutes au plus), jusqu'à la fermeture, et le statut demande
 de vérifier la vanne. Une vanne qui change (sortie de défaut, bougée à la
-main), un contrôleur qui répond de nouveau après un silence (redémarré) ou un
-redémarrage de l'intégration redonnent 3 renvois rapides. Un silence, un
+main), un contrôleur qui répond de nouveau après un silence ou qui a redémarré
+(sa durée de fonctionnement baisse) ou un redémarrage de l'intégration
+redonnent 3 renvois rapides. Un silence, un
 contrôleur injoignable ou une réponse « en mouvement » ne comptent jamais
 comme essai.
 
@@ -90,7 +91,12 @@ côté sûr), et la fermeture de la vanne demandée est **gardée** : elle part 
 où cette vanne répond depuis le démarrage, sinon vers chaque adresse
 configurée pas encore identifiée depuis le démarrage ; s'il n'y en a aucune,
 elle attend (dans `/data`, dit dans le statut) que cette vanne réponde à une
-adresse configurée.
+adresse configurée. L'identité de chaque adresse configurée est alors lue
+tout de suite (quel que soit l'intervalle), et dès que cette vanne répond à
+une adresse, toute fermeture d'elle gardée pour une autre adresse y part.
+Supprimer cette vanne dans Gladys abandonne une fermeture encore cherchée.
+Une fermeture gardée dans `/data` dont l'UID est illisible part à son adresse
+quelle que soit la vanne qui y répond (le côté sûr).
 
 La fermeture est refusée, rien envoyé, dans deux cas seulement :
 

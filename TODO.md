@@ -46,6 +46,23 @@ up to date at the end of every milestone.
 
 ## Decisions
 
+- **Review r2 (2026-10-31)**:
+  - I1: `foundValve` takes every close of a valve kept for another address
+    (one not identified as it) as soon as the valve is identified; a close
+    sent astray reads the identity of every configured address at once
+    (`probeIdentities`, one ping per address every 5 s at most, outside the
+    interval: protective). A check of a close never sent takes the line like
+    a click (`stop`), so a read stuck on a silent controller never delays it.
+  - I2: every UDP exchange of `test/io.test.js` has its own deadline
+    (`AbortSignal.timeout`), the FIFO tests race a 2 s deadline and wake a
+    blocked `open()` in `t.after` (O_RDWR | O_NONBLOCK): h01, h03, h04 fail in
+    3 to 10 s and the process ends. `timeout-minutes` on every CI job (20,
+    60 for the multi-arch build).
+  - I3: `test/review2.test.js`, one test per survivor.
+  - Minor: a kept close with no readable UID is "any valve" (sent in doubt);
+    a held close reads the diagnostics at each check, an uptime that drops
+    re-arms it; deleting a valve in Gladys gives up its lost close.
+
 - **Review r1 (2026-10-31)**:
   - B1: `prepareGuard` makes a NEW guard object for each click; an open lets
     go only the guard it removed from `/data` (`dropGuard(ctl, guard)`

@@ -49,6 +49,8 @@ export function fakeGuardian({
       ]),
     ),
     latencyMs: 20,
+    /** Seconds since its start, as diagnostics say. */
+    uptime: 41,
     /** No answer at all (a controller off). */
     silent: false,
     /** Commands answered by nothing (lost answers), applied all the same. */
@@ -103,7 +105,7 @@ export function fakeGuardian({
           answer = ok({
             codename: 'gvc1',
             uid: dev.uid,
-            uptime: 41,
+            uptime: dev.uptime,
             firmware: '0.20.9-beta+official.ef3',
             rf_modem_firmware: '4.0.0',
             available_heap: 34456,

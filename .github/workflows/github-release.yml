@@ -28,6 +28,8 @@ on:
 jobs:
   releases:
     runs-on: ubuntu-latest
+    # A test that hangs fails the job, never holds a runner for hours.
+    timeout-minutes: 20
     permissions:
       contents: write # create the Releases
     # One run at a time, so two runs never create the same Release.

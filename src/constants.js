@@ -154,6 +154,8 @@ export const TIMINGS = {
   stateHeartbeat: 30 * MINUTE,
   /** The "Test the connection" button reads at most this often. */
   testEvery: 10 * SECOND,
+  /** The identity of an address is probed (a close went astray) at most this often. */
+  probeEvery: 5 * SECOND,
   /** A close watched for a valve still closing this long is said in the status. */
   closingLong: 2 * MINUTE,
 };

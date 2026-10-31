@@ -36,6 +36,8 @@ on:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    # A test that hangs fails the job, never holds a runner for hours.
+    timeout-minutes: 20
     permissions:
       contents: write # commit the version bump and push the tag
     outputs:

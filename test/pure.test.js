@@ -113,6 +113,7 @@ test('answers: the fixtures of aioguardian, strictly', () => {
     uid: 'ABCDEF123456',
     codename: 'gvc1',
     firmware: '0.20.9-beta+official.ef3',
+    uptime: 41,
   });
   assert.equal(normalizeUid('abcdef123456'), 'ABCDEF123456');
   for (const bad of ['', 'abc', '../x', 'AB:CD', 'A'.repeat(17), 12345678]) {

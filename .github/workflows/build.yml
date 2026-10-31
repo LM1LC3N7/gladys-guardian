@@ -40,6 +40,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A test that hangs fails the job, never holds a runner for hours.
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write

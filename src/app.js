@@ -140,6 +140,8 @@ const freshController = (address, configured) => ({
   checkDueAt: Infinity,
   checking: false,
   opening: false,
+  /** Monotonic time of the last identity probe (src/app.js probeIdentities). */
+  probedAt: -Infinity,
   /** The last read or check of this controller had no answer (cleared by the next answer). */
   silent: false,
   lastTestAt: -Infinity,
@@ -804,7 +806,7 @@ export class GuardianApp {
   /** The line of one close kept. */
   stopLine(ctl) {
     const g = ctl.guard;
-    const where = `${ctl.addressText} (${[...g.uids].join(', ')})`;
+    const where = `${ctl.addressText} (${[...g.uids].join(', ') || '?'})`;
     if (ctl.stopJobs.length > 0 || ctl.stopWorker) return T.stopSending(where);
     if (!g.written) return T.stopNotSent(where, g.failure ?? 'waiting');
     if (g.held) {
@@ -1014,6 +1016,14 @@ export class GuardianApp {
     this.badge = undefined;
     if (typeof device?.external_id === 'string') {
       this.publisher.forget(device.external_id);
+    }
+    // A valve removed from Gladys: its close searched for is given up (the
+    // closes sent to an address stay until seen applied).
+    const parsed = parseExternalId(device?.external_id);
+    if (parsed?.kind === 'controller' && !parsed.key && this.lost.delete(parsed.uid)) {
+      this.logger.info(`Guardian: close of ${parsed.uid} given up (device deleted)`);
+      this.persist(TIMINGS.stopSaveWait).catch(() => {});
+      await this.updateStatus();
     }
   }
 
@@ -1694,7 +1704,8 @@ export class GuardianApp {
    * again on a slower cadence, `nextHeldAt`), 'send' (never left).
    */
   decideStop(guard, read, readSeq, readStartedAt) {
-    if (read?.uid && !guard.uids.has(read.uid)) return 'other';
+    // No UID (an entry of /data that cannot be read): any valve there, in doubt.
+    if (read?.uid && guard.uids.size > 0 && !guard.uids.has(read.uid)) return 'other';
     if (!guard.written) return 'send';
     if (readSeq !== undefined && guard.sentSeq !== undefined && readSeq < guard.sentSeq) {
       return 'stale';
@@ -1791,6 +1802,8 @@ export class GuardianApp {
   /** Sends the close of `uid` where its valve is now, or keeps it until it is found. */
   relocate(uid, from, readUid, since = this.now()) {
     const targets = this.relocateTargets(uid, from);
+    // Where is it now? Every configured address says it at once.
+    this.probeIdentities(from);
     if (targets.length === 0) {
       const lost = this.lost.get(uid);
       this.lost.set(uid, {
@@ -1813,19 +1826,68 @@ export class GuardianApp {
     this.updateStatus().catch(() => {});
   }
 
-  /** A valve identified at a controller: the closes searched for it go there now. */
+  /**
+   * A valve identified at a controller: its closes searched for (lost) or
+   * parked at another address (one that does not answer it) come here now.
+   */
   foundValve(ctl, uid) {
+    let since;
     if (this.lost.has(uid)) {
-      const { since } = this.lost.get(uid);
+      since = this.lost.get(uid).since;
       this.lost.delete(uid);
-      const guard = this.prepareGuard(ctl, [uid]);
-      guard.since = Math.min(guard.since, since);
+    }
+    for (const other of this.controllers.values()) {
+      const g = other.guard;
+      if (other === ctl || other.uid === uid || !g?.uids.has(uid)) continue;
+      since = Math.min(since ?? g.since, g.since);
+      g.uids.delete(uid);
+      if (g.uids.size === 0) this.dropGuard(other, g, `${uid} answers at ${ctl.addressText}`);
+    }
+    if (since !== undefined) {
+      if (!ctl.guard?.uids.has(uid)) {
+        const guard = this.prepareGuard(ctl, [uid]);
+        guard.since = Math.min(guard.since, since);
+      }
       this.logger.warn(`Guardian: ${uid} found at ${ctl.addressText}: its close goes there`);
       this.armStopCheck(ctl, 0);
       this.persist(TIMINGS.stopSaveWait).catch(() => {});
+      this.updateStatus().catch(() => {});
     }
     // A close kept here for another valve: that valve is not here.
     if (ctl.guard) this.misplaced(ctl, ctl.guard, uid);
+  }
+
+  /**
+   * A close went to the wrong valve: the identity of every configured
+   * address is read now (a protective read, whatever the interval; one per
+   * address every 5 s at most), so the valve is found where it moved.
+   */
+  probeIdentities(except) {
+    for (const c of this.configured()) {
+      if (c === except || this.stopped) continue;
+      if (this.mono() - c.probedAt < TIMINGS.probeEvery) continue;
+      c.probedAt = this.mono();
+      this.probe(c).catch((err) => this.logger.debug(`Guardian: probe failed: ${err.message}`));
+    }
+  }
+
+  async probe(ctl) {
+    const holder = await ctl.lane.acquire('check');
+    try {
+      const r = await this.request(ctl, holder, CMD.PING, {
+        timeoutMs: TIMINGS.readTimeout,
+        tries: TIMINGS.readTries,
+      });
+      const { uid } = parsePing(r.answer);
+      if (uid) {
+        this.identify(ctl, uid);
+        this.answered(ctl);
+      }
+    } catch (err) {
+      if (err?.kind !== ERROR_KINDS.ABORTED) ctl.silent = true;
+    } finally {
+      holder.release();
+    }
   }
 
   /** The lost closes try the addresses again (a new configuration). */
@@ -1915,7 +1977,9 @@ export class GuardianApp {
       }
     };
     try {
-      holder = await ctl.lane.acquire('check');
+      // A close that never left takes the line like a click (it ends a read
+      // stuck on a silent controller); a resend waits for its turn.
+      holder = await ctl.lane.acquire(guard.written ? 'check' : 'stop');
       if (this.checkMustYield(ctl) || ctl.guard !== guard) {
         yielded = true;
       } else if (!guard.written) {
@@ -1929,6 +1993,27 @@ export class GuardianApp {
           // Nothing readable: sent again, in doubt (the close is the safe side).
           ctl.silent = true;
           back = { read: undefined, seq: undefined, startedAt: this.mono() };
+        }
+        if (guard.held && back.read && ctl.guard === guard) {
+          // Held: the uptime tells a restart of the controller between two
+          // checks apart (a new budget of quick resends).
+          try {
+            const d = parseDiagnostics(
+              (
+                await this.request(ctl, holder, CMD.DIAGNOSTICS, {
+                  timeoutMs: TIMINGS.readTimeout,
+                })
+              ).answer,
+            );
+            if (d.uptime !== undefined) {
+              if (guard.uptime !== undefined && d.uptime < guard.uptime) {
+                this.rearm(guard, 'the controller restarted');
+              }
+              guard.uptime = d.uptime;
+            }
+          } catch (err) {
+            if (err?.kind === ERROR_KINDS.ABORTED) throw err;
+          }
         }
         if (ctl.guard === guard) {
           const decision = this.decideStop(guard, back.read, back.seq, back.startedAt);

@@ -49,6 +49,8 @@ export function parseDiagnostics(answer) {
     uid: normalizeUid(data.uid),
     codename: text(data.codename, 16),
     firmware: text(data.firmware, 64),
+    /** Seconds since the controller started (a drop: it restarted). */
+    uptime: intIn(data.uptime, 0, 2 ** 31),
   };
 }
 

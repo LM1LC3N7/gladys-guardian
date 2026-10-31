@@ -75,8 +75,8 @@ stays open or in a fault: 3 times quickly (each accepted by the controller,
 2.4 s apart); then, held, every 30 seconds, then less and less often (10
 minutes apart at most), until the valve closes, and the status asks you to
 check the valve. A valve that changes (out of its fault, moved by hand), a
-controller that answers again after a silence (rebooted) or a restart of the
-integration gives 3 quick resends again. A silence, an unreachable controller
+controller that answers again after a silence or restarted (its uptime drops)
+or a restart of the integration gives 3 quick resends again. A silence, an unreachable controller
 or a "moving" answer never counts as a try.
 
 When another valve (another UID) answers at the address the close went to
@@ -84,7 +84,12 @@ When another valve (another UID) answers at the address the close went to
 side), and the close of the valve you clicked is **kept**: it goes where that
 valve answers in this run, else to every configured address not identified
 in this run; if there is none, it waits (in `/data`, said in the status)
-until that valve answers at a configured address.
+until that valve answers at a configured address. The identity of every
+configured address is read at once then (whatever the refresh interval), and
+as soon as that valve answers at an address, every close of it kept for
+another address goes there. Deleting that valve in Gladys gives up a close
+still searched for. A close kept in `/data` whose UID cannot be read goes to
+its address whatever valve answers there (the safe side).
 
 The close is refused, nothing sent, in two cases only:
 
