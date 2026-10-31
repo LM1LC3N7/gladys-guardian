@@ -1,6 +1,6 @@
 {
   "name": "gladys-guardian",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for Guardian (Elexa) valve controllers and their paired leak sensors over the local UDP API: valve, leaks, temperatures, batteries; opening off by default, closing never held back. Unofficial, not affiliated with Elexa.",
   "type": "module",

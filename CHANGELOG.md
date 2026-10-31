@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-31
+
 ### Added
 
 - Guardian (Elexa) valve controllers read over their local UDP API (port
@@ -31,3 +33,6 @@ the notes of the version's GitHub Release.
   or a sensor not read, a moving or faulty valve, or another controller at
   the address.
 - "Test the connection" button, never reading sooner than the interval.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-guardian/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-guardian/releases/tag/v0.1.1
