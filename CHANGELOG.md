@@ -23,7 +23,9 @@ the notes of the version's GitHub Release.
   the configuration not read, `/data` slow), kept in `/data` until seen
   closed, never given up before it left, never let go by time; held after 3
   accepted resends without effect, then sent again less and less often;
-  following its valve (UID) when another valve answers at its address.
+  following its valve (UID) when another valve answers at its address; a
+  click that finds a close already moving the valve is answered as a close
+  under way, and its datagram never waits for a check's.
 - "Open the valve" behind "Allow opening the valve" (off by default), decided
   on a fresh read of the valve and of every paired sensor, refused on a leak
   or a sensor not read, a moving or faulty valve, or another controller at

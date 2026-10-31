@@ -56,7 +56,8 @@
 // when no address is known to hold it, to every configured address whose
 // controller was never identified (the address the user typed). Refused
 // unsent only when every known address holds another valve, or no address is
-// known at all. Tried every 250 ms for 3 s; not seen applied, it is kept in
+// known at all. Tried every 250 ms for 3 s (a valve that answers "moving"
+// is read once: closing, it is a close under way); not seen applied, it is kept in
 // /data and checked every 15 s (5 s while the valve closes): sent again
 // while the valve stays open or in a fault (3 times at most once the valve
 // accepted it, then held and said in the status), let go when a read shows
@@ -1536,7 +1537,8 @@ export class GuardianApp {
   /**
    * The close clicked on one controller: written at once (no read before),
    * tried again every 250 ms on a "moving" (the controller refuses any
-   * command while its valve moves) or right away after a silence (one try
+   * command while its valve moves; the first "moving" reads the valve once:
+   * closing, it is a close under way) or right away after a silence (one try
    * waits 1.2 s), for 3 s; then one read back (identity and valve) that
    * alone confirms it, for the valve clicked only. Not confirmed: kept (in
    * /data) and checked.
@@ -1555,6 +1557,7 @@ export class GuardianApp {
     const retryUntil = Math.max(received, this.mono()) + TIMINGS.stopRetryFor;
     let accepted = false;
     let busy = false;
+    let movingRead = false;
     let failure;
     let back;
     const holder = await ctl.lane.acquire('stop');
@@ -1600,6 +1603,23 @@ export class GuardianApp {
           guard.refused = undefined;
           guard.accepted += 1;
           break;
+        }
+        if (busy && !movingRead) {
+          // The valve moves: our own close under way (a check, a click just
+          // before), the app or the button. Read once: closing or closed is
+          // a close under way, never "refused" (judged below like a read
+          // back); another valve there goes on where its valve is.
+          movingRead = true;
+          try {
+            const read = await this.readStopState(ctl, holder, answerBy - 100);
+            const { uid, state } = read.read;
+            if (state === VALVE.CLOSED || VALVE.isClosing(state) || (uid && !guard.uids.has(uid))) {
+              back = read;
+              break;
+            }
+          } catch {
+            // Not read: tried again as before.
+          }
         }
         if (this.mono() + TIMINGS.stopRetry >= retryUntil || this.stopped) break;
         await this.sleep(TIMINGS.stopRetry);
@@ -1978,8 +1998,11 @@ export class GuardianApp {
     };
     try {
       // A close that never left takes the line like a click (it ends a read
-      // stuck on a silent controller); a resend waits for its turn.
-      holder = await ctl.lane.acquire(guard.written ? 'check' : 'stop');
+      // stuck on a silent controller), but a click cuts it at once (the
+      // click's close carries its valves); a resend waits for its turn.
+      holder = await (guard.written
+        ? ctl.lane.acquire('check')
+        : ctl.lane.acquire('stop', { preemptible: true }));
       if (this.checkMustYield(ctl) || ctl.guard !== guard) {
         yielded = true;
       } else if (!guard.written) {

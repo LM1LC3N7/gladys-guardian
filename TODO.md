@@ -46,13 +46,26 @@ up to date at the end of every milestone.
 
 ## Decisions
 
+- **Review r3 (2026-10-31)**:
+  - I1: `test/review3.test.js`, one test per surviving guard: r13 (the check
+    of a close never sent waits for an open in flight), r07 (a resend check
+    waits for a poll read, a click cuts it), r04 (one identity probe per
+    address every 5 s), r11 (a guard emptied by `foundValve` is dropped: the
+    offline controller, back, is never closed for another valve).
+  - m1: the check of a close never sent takes the line as a _preemptible_
+    close (`Lane.acquire('stop', { preemptible: true })`): it still cuts a
+    stuck read, but a clicked close cuts it at once (the click's guard holds
+    its valves, nothing is lost), so the click's datagram never waits for the
+    check's answer. A click refused "moving" reads the valve once: closing or
+    closed = a close under way (success), never "refuses any command".
 - **Review r2 (2026-10-31)**:
   - I1: `foundValve` takes every close of a valve kept for another address
     (one not identified as it) as soon as the valve is identified; a close
     sent astray reads the identity of every configured address at once
     (`probeIdentities`, one ping per address every 5 s at most, outside the
     interval: protective). A check of a close never sent takes the line like
-    a click (`stop`), so a read stuck on a silent controller never delays it.
+    a click (`stop`), so a read stuck on a silent controller never delays it
+    (a clicked close cuts it in turn since r3).
   - I2: every UDP exchange of `test/io.test.js` has its own deadline
     (`AbortSignal.timeout`), the FIFO tests race a 2 s deadline and wake a
     blocked `open()` in `t.after` (O_RDWR | O_NONBLOCK): h01, h03, h04 fail in
@@ -122,7 +135,10 @@ up to date at the end of every milestone.
   another UID. Another UID read there: see r1 B2 (relocated, never dropped).
 - **"Moving" (error 20)** is not a try: the controller refuses any command
   while the valve moves; the close is retried every 250 ms for 3 s, then by
-  the checks (every 2 s while it says "moving").
+  the checks (every 2 s while it says "moving"). The first "moving" of a
+  click reads the valve once (`sendStop`): closing or closed is a close under
+  way (judged by `decideStop` like a read back: a success for the valve
+  read), another UID is misplaced; opening or a fault: retried as before.
 - **"Already closed" (error 18)** is an accepted close; **"already open"
   (17)** an accepted open.
 - **Resends**: only a close the controller accepted counts; 3 without effect

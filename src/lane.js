@@ -9,7 +9,10 @@
 // Priorities: the close (3) first, then a command (2), the check of a close
 // (1), the reads of the polling (0); in the order of arrival within one. A
 // close arriving aborts whatever holds the line (a read stuck on a silent
-// controller, a command) and takes it as soon as that socket is closed.
+// controller, a command) and takes it as soon as that socket is closed. A
+// `preemptible` close (the check of a close that never left) aborts the
+// same, but a clicked close aborts it in turn: the click carries its valves,
+// so its datagram never waits for the answer of the check's.
 // -----------------------------------------------------------------------------
 
 import { ERROR_KINDS, GuardianError } from './guardian/udp.js';
@@ -33,15 +36,16 @@ export class Lane {
 
   /**
    * The line for `kind`. `signal`: gives the wait up (rejects, nothing
-   * taken). Resolves `{ kind, signal, release() }`.
+   * taken). `preemptible` (a 'stop' only): a clicked 'stop' cuts it.
+   * Resolves `{ kind, preemptible, signal, release() }`.
    */
-  acquire(kind, { signal } = {}) {
+  acquire(kind, { signal, preemptible = false } = {}) {
     if (signal?.aborted) {
       return Promise.reject(new GuardianError(ERROR_KINDS.ABORTED, 'No turn on the line'));
     }
     const priority = PRIORITY[kind];
     return new Promise((resolve, reject) => {
-      const waiter = { kind, priority, resolve, reject, signal, onAbort: undefined };
+      const waiter = { kind, priority, preemptible, resolve, reject, signal, onAbort: undefined };
       if (signal) {
         waiter.onAbort = () => {
           const index = this.waiting.indexOf(waiter);
@@ -52,10 +56,18 @@ export class Lane {
         };
         signal.addEventListener('abort', waiter.onAbort, { once: true });
       }
-      // In priority order, first come first served within one.
-      const at = this.waiting.findIndex((w) => w.priority < priority);
+      // In priority order, first come first served within one (a clicked
+      // close before a preemptible one).
+      const firm = kind === 'stop' && !preemptible;
+      const at = this.waiting.findIndex(
+        (w) => w.priority < priority || (firm && w.kind === 'stop' && w.preemptible),
+      );
       this.waiting.splice(at < 0 ? this.waiting.length : at, 0, waiter);
-      if (kind === 'stop' && this.holder && this.holder.kind !== 'stop') {
+      if (
+        kind === 'stop' &&
+        this.holder &&
+        (this.holder.kind !== 'stop' || (firm && this.holder.preemptible))
+      ) {
         this.holder.controller.abort();
       }
       this.grant();
@@ -71,6 +83,7 @@ export class Lane {
     const controller = new AbortController();
     const holder = {
       kind: waiter.kind,
+      preemptible: waiter.preemptible,
       controller,
       signal: controller.signal,
       release: () => {

@@ -71,7 +71,11 @@ encore lue, ni disque lent. Il part :
 Il est envoyé tout de suite. Un essai attend sa réponse 1,2 s : après un
 silence il est renvoyé aussitôt, après une réponse « en mouvement » (le
 contrôleur refuse toute commande pendant un mouvement) 250 ms plus tard,
-pendant 3 secondes. Il est ensuite **gardé** dans `/data` et revérifié toutes
+pendant 3 secondes. La première réponse « en mouvement » fait lire la vanne
+une fois : en fermeture ou fermée (une fermeture déjà en route, d'une
+vérification, d'un clic juste avant ou du bouton), le clic est une fermeture
+en cours, répondue comme une fermeture acceptée, jamais « refusée ». Il est
+ensuite **gardé** dans `/data` et revérifié toutes
 les 15 secondes (5 secondes pendant la fermeture), même après un redémarrage,
 avant même que Gladys donne la configuration, jusqu'à ce qu'une lecture
 montre la vanne **fermée**. Il est renvoyé tant que la vanne reste ouverte ou
