@@ -68,9 +68,11 @@ disk. It goes:
 It is sent at once. One try waits 1.2 s for the answer: after a silence it is
 sent again at once, after a "moving" answer (the controller refuses any
 command while its valve moves) 250 ms later, for 3 seconds. The first
-"moving" answer reads the valve once: closing or closed (a close already on
-its way, from a check, a click just before or the button), the click is a
-close under way, answered like an accepted one, never "refused". Then it is
+"moving" answer reads the valve once: closing (a close already on its way,
+from a check, a click just before or the button), the click is a close under
+way, answered like an accepted one, never "refused"; closed, it is answered
+"not confirmed yet", kept, and the next check (5 s later) confirms it (a
+status read right after "moving" may lag behind an open starting). Then it is
 **kept** in `/data` and checked every 15 seconds (5 seconds while the valve
 closes), also after a restart, before Gladys even gives the configuration,
 until a read shows the valve **closed**. It is sent again while the valve

@@ -1538,7 +1538,8 @@ export class GuardianApp {
    * The close clicked on one controller: written at once (no read before),
    * tried again every 250 ms on a "moving" (the controller refuses any
    * command while its valve moves; the first "moving" reads the valve once:
-   * closing, it is a close under way) or right away after a silence (one try
+   * closing, it is a close under way; closed, kept and confirmed by the next
+   * check) or right away after a silence (one try
    * waits 1.2 s), for 3 s; then one read back (identity and valve) that
    * alone confirms it, for the valve clicked only. Not confirmed: kept (in
    * /data) and checked.
@@ -1558,6 +1559,7 @@ export class GuardianApp {
     let accepted = false;
     let busy = false;
     let movingRead = false;
+    let closedAfterMoving = false;
     let failure;
     let back;
     const holder = await ctl.lane.acquire('stop');
@@ -1606,15 +1608,22 @@ export class GuardianApp {
         }
         if (busy && !movingRead) {
           // The valve moves: our own close under way (a check, a click just
-          // before), the app or the button. Read once: closing or closed is
-          // a close under way, never "refused" (judged below like a read
-          // back); another valve there goes on where its valve is.
+          // before), the app or the button. Read once: closing is a close
+          // under way, never "refused" (judged below like a read back);
+          // another valve there goes on where its valve is. "Closed" right
+          // after "moving" proves nothing (a status that lags behind an open
+          // starting): never a success nor let go here, the guard is kept
+          // and the next check (5 s) confirms it.
           movingRead = true;
           try {
             const read = await this.readStopState(ctl, holder, answerBy - 100);
             const { uid, state } = read.read;
-            if (state === VALVE.CLOSED || VALVE.isClosing(state) || (uid && !guard.uids.has(uid))) {
+            if (VALVE.isClosing(state) || (uid && !guard.uids.has(uid))) {
               back = read;
+              break;
+            }
+            if (state === VALVE.CLOSED) {
+              closedAfterMoving = true;
               break;
             }
           } catch {
@@ -1656,6 +1665,7 @@ export class GuardianApp {
       if (decision === 'done' || (decision === 'watch' && guard.seenApplied)) {
         return readUid === uid ? {} : { error: ERRORS.closeNotIdentified(where) };
       }
+      if (closedAfterMoving) return { error: ERRORS.closeUnconfirmed(where) };
       if (failure && !accepted) {
         if (guard.refused) return { error: ERRORS.closeRefused(where, guard.refused) };
         if (busy) return { error: ERRORS.closeBusy(where) };
@@ -1676,7 +1686,7 @@ export class GuardianApp {
     if (ctl.guard === guard) {
       const next = !guard.written
         ? SECOND
-        : guard.seenApplied
+        : guard.seenApplied || closedAfterMoving
           ? TIMINGS.stopWatch
           : guard.sentAt !== undefined
             ? Math.max(0, guard.sentAt + TIMINGS.stopApplyDelay - this.mono()) + TIMINGS.applyWait

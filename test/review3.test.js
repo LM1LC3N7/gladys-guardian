@@ -231,7 +231,7 @@ test('m1: a click on a valve that opens reads it once, then tries again as befor
   assert.ok(s.dev.count(CLOSE) >= 5);
 });
 
-test('m1: a click refused "moving" as the valve ends closing: read closed, a success without another datagram', async (t) => {
+test('r4 m1: "closed" read right after "moving": never a success nor let go there, the next check confirms it', async (t) => {
   const s = await setup(t);
   // The valve was closing (the button): it reaches "closed" as it refuses the click.
   s.dev.move(5, 8, [[6, 300]]);
@@ -241,10 +241,34 @@ test('m1: a click refused "moving" as the valve ends closing: read closed, a suc
     return answer;
   });
   const outcome = await s.press('close');
-  assert.equal(ackError(outcome), undefined);
+  assert.match(ackError(outcome), /pas encore confirmée : revérifiée/);
+  assert.equal(s.dev.count(CLOSE), 1, 'no other datagram');
+  assert.ok(s.app.controllers.get(HOST).guard, 'kept');
+  await s.advance(6 * SECOND, 100);
+  assert.equal(s.app.controllers.get(HOST).guard, undefined, 'let go once a check reads it closed');
   assert.equal(s.dev.count(CLOSE), 1);
-  assert.equal(s.app.controllers.get(HOST).guard, undefined, 'let go: read closed');
 });
+
+for (const lagMs of [500, 3 * SECOND]) {
+  test(`r4 m1: a status that lags ${lagMs} ms behind an open starting is never taken for a close done`, async (t) => {
+    const s = await setup(t);
+    s.dev.valve = 8;
+    // The valve starts opening (the app): commands get "moving" at once, but
+    // the status still says "closed" for a while.
+    let lag = true;
+    s.dev.forge.set(COMMANDS.VALVE_STATUS, (a) =>
+      lag ? { ...a, data: { ...a.data, state: 8 } } : a,
+    );
+    s.dev.openElsewhere();
+    s.clock.timers.setTimeout(() => (lag = false), lagMs);
+    const outcome = await s.press('close');
+    assert.match(ackError(outcome), /pas encore confirmée : revérifiée/, 'never a success');
+    assert.ok(s.app.controllers.get(HOST).guard, 'kept');
+    await s.advance(30 * SECOND, 100);
+    assert.equal(s.dev.valve, 8, 'the newer click wins: closed once the opening ended');
+    assert.equal(s.app.controllers.get(HOST).guard, undefined);
+  });
+}
 
 test('m1: a click refused "moving" by another valve now at the address: said so, never resent to it', async (t) => {
   const s = await setup(t);
@@ -256,6 +280,39 @@ test('m1: a click refused "moving" by another valve now at the address: said so,
   assert.match(ackError(outcome), /c'est la vanne BBBB00000000 qui y répond, pas ABCDEF123456/);
   assert.equal(s.dev.count(CLOSE), 1, 'one datagram, then never another to valve Y');
   assert.equal(s.app.lost.has(UID), true, 'the close of the valve clicked is kept, searched for');
+});
+
+test('r4 I1: a click that cuts the check of the close of another valve carries it: that valve still closes', async (t) => {
+  const clock = testClock({ start: NOW });
+  const net = network({ timers: clock.timers });
+  const A = net.add(fakeGuardian({ timers: clock.timers, uid: Y, sensors: [] }), '192.168.1.41');
+  const B = net.add(fakeGuardian({ timers: clock.timers, uid: X, sensors: [] }), '192.168.1.42');
+  const s = await setup(t, {
+    clock,
+    net,
+    dev: A,
+    create: false,
+    config: { addresses: '192.168.1.41,192.168.1.42', refresh_interval: 3600 },
+  });
+  await s.advance(3 * SECOND);
+  const ctlA = s.app.controllers.get('192.168.1.41');
+  assert.equal(ctlA.uid, Y);
+  // A close of X kept at A that never left (a fan-out, /data): its check sends
+  // it, the answer takes 800 ms; a click for Y (A's valve) comes meanwhile.
+  A.delay.set(CLOSE, 800);
+  const at = closeTimes(s, A);
+  unsentClose(s, ctlA, [X]);
+  await until(s, () => at.length === 1);
+  await s.advance(100, 10);
+  A.delay.delete(CLOSE);
+  const click = start(s, 'close', valveId(Y));
+  await until(s, () => at.length === 2, 2 * SECOND);
+  assert.ok(at[1] - at[0] < 200, 'the click cut the check');
+  await s.advance(15 * SECOND, 100);
+  await click.ack;
+  assert.equal(A.valve, 8, 'Y (clicked) closed');
+  assert.ok(B.count(CLOSE) >= 1, 'the close of X went on to its valve');
+  assert.equal(B.valve, 8, 'X closed');
 });
 
 test('m1: the lane: a clicked close cuts a preemptible one, never the reverse', async () => {

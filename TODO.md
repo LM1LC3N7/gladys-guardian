@@ -43,9 +43,20 @@ up to date at the end of every milestone.
 - What the onboard sensor and a paired sensor answer once a sensor stops
   reporting (dead battery): the API dates nothing.
 - The UID of a controller: the same in ping and diagnostics (assumed).
+- Whether the valve status can lag behind the motor: a controller answering
+  "moving" (20) to a close while its status still reads "closed" for a moment
+  (an open just started). The module never lets a close go on a "closed" read
+  right after "moving" (kept, the next check 5 s later confirms it); a lag
+  longer than that would still be read as closed.
 
 ## Decisions
 
+- **Review r4 (2026-10-31)**:
+  - I1: a test where a click for Y cuts the check of a close of X kept at the
+    same address: the click's guard carries X (`prepareGuard`), X goes on to
+    its valve and closes.
+  - m1: "closed" read right after a "moving" answer is never a success nor
+    lets the close go: answered "not confirmed yet", kept, next check in 5 s.
 - **Review r3 (2026-10-31)**:
   - I1: `test/review3.test.js`, one test per surviving guard: r13 (the check
     of a close never sent waits for an open in flight), r07 (a resend check
@@ -136,9 +147,12 @@ up to date at the end of every milestone.
 - **"Moving" (error 20)** is not a try: the controller refuses any command
   while the valve moves; the close is retried every 250 ms for 3 s, then by
   the checks (every 2 s while it says "moving"). The first "moving" of a
-  click reads the valve once (`sendStop`): closing or closed is a close under
-  way (judged by `decideStop` like a read back: a success for the valve
-  read), another UID is misplaced; opening or a fault: retried as before.
+  click reads the valve once (`sendStop`): closing is a close under way
+  (judged by `decideStop` like a read back: a success for the valve read),
+  another UID is misplaced; closed is "not confirmed yet", kept, confirmed by
+  the next check 5 s later (a status that lags behind an open starting would
+  read closed: never let go on that one read); opening or a fault: retried as
+  before.
 - **"Already closed" (error 18)** is an accepted close; **"already open"
   (17)** an accepted open.
 - **Resends**: only a close the controller accepted counts; 3 without effect
