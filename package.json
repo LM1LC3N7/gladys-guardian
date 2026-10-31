@@ -1,8 +1,8 @@
 {
-  "name": "gladys-integration-template-js",
-  "version": "1.0.0",
+  "name": "gladys-guardian",
+  "version": "0.1.0",
   "private": true,
-  "description": "Official starter template to build an external integration for Gladys Assistant with the JavaScript SDK.",
+  "description": "Gladys Assistant external integration for Guardian (Elexa) valve controllers and their paired leak sensors over the local UDP API: valve, leaks, temperatures, batteries; opening off by default, closing never held back. Unofficial, not affiliated with Elexa.",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -10,7 +10,10 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "node --test"
+    "test": "node --test --test-timeout=60000",
+    "audit": "npm audit --omit=dev",
+    "cover": "node scripts/cover.mjs cover.png",
+    "validate:manifest": "npx --yes github:GladysAssistant/integration-store ."
   },
   "engines": {
     "node": ">=22"

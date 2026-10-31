@@ -11,11 +11,26 @@ Gladys through
 [`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js),
 its only runtime dependency. It started from the official JavaScript template.
 
+This repository: **Guardian (Elexa)** valve controllers and their paired
+leak sensors through their local UDP API, the logic of aioguardian (MIT, see
+THIRD_PARTY_NOTICES.md) ported to JavaScript. Decisions and open questions
+live in `TODO.md`.
+
+**Valve safety is not negotiable**: closing the valve is the stop of this
+module and is never held back (no option, no read, no open in progress, no
+configuration, no `/data` wait without a 200 ms bound); it is kept in `/data`
+until a read shows the valve closed, never let go by time nor before it
+left. `allow_valve_open` stays off by default; an open is serialized per
+controller, decided on a fresh read (never on the state in memory), refused
+on a leak, a moving or faulty valve, another UID, and never leaves after a
+close clicked later. Never a `switch`, never the halt command (19). Keep the
+tests that prove it (`test/close.test.js`, `test/open.test.js`).
+
 ## Commands
 
 ```bash
 npm install
-npm test                                  # node --test, the built-in runner
+npm test                                  # node --test --test-timeout=60000
 node --test test/devices.test.js          # one file
 node --test --test-name-pattern "plug"    # tests whose name matches
 npm run lint                              # ESLint
@@ -31,16 +46,21 @@ pushing.
 ## Architecture
 
 ```
-index.js                          SDK wiring only: handlers registered before connect()
-src/devices/index.js              registry of the device blueprints + dispatch helpers
-src/devices/<type>.js             one device type per file (buildDevice, onPoll, onSetValue...)
-src/scenes.js                     scene action handlers (manifest `scene_actions`)
-src/widgets.js                    dashboard widget handlers (manifest `widgets`)
-src/config.js                     DEFAULT_CONFIG (mirrors the manifest defaults) + normalization
-src/weather.js                    example driver (Open-Meteo)
-gladys-assistant-integration.json manifest: name, config_schema, actions, image...
+index.js                          SDK wiring only (src/handlers.js registers before connect())
+src/handlers.js                   the SDK handlers -> GuardianApp (shared with the tests)
+src/app.js                        GuardianApp: reads, states, badge, status, open, close (kept)
+src/lane.js                       one request at a time per controller, the close first
+src/guardian/udp.js               the only network access: a UDP socket per request, bounded
+src/guardian/model.js             answers -> readings (pure, strict), °F -> °C
+src/devices.js                    readings -> Gladys devices and states (pure)
+src/publisher.js                  states to Gladys within 300/min, nothing older than 2 min
+src/store.js                      /data/guardian-state.json (addresses, closes kept), bounded
+src/config.js                     DEFAULT_CONFIG (mirrors the manifest) + normalization
+src/constants.js, src/i18n.js     commands, keys, timings; en/fr texts
+gladys-assistant-integration.json manifest: name, config_schema, actions
 docs/en.md, docs/fr.md            user documentation, re-hosted by Gladys (mandatory)
-test/                             node --test, against the SDK's fake Gladys (integration-sdk/testing)
+test/                             node --test, SDK fake Gladys + test/helpers/fakeGuardian.js
+test/kit/                         clocks of gladys-testkit (virtual, real x20)
 .github/scripts/release.mjs       release helpers (manifest bump, changelog), tested in test/
 ```
 
@@ -73,4 +93,7 @@ test/                             node --test, against the SDK's fake Gladys (in
 - **User-facing text** is bilingual (English and French): action messages,
   manifest texts, and `docs/en.md` / `docs/fr.md`, kept in sync.
 - **Style.** Prettier formats, ESLint catches mistakes. Comments explain why,
-  in English. Tests never touch the network.
+  in English. Tests never touch the network, and pass on Node 22 and 24.
+- **Encoding.** Text files are UTF-8 without BOM; `test/manifest.test.js`
+  refuses mojibake and a BOM. Write files with an editor, never with
+  PowerShell's `Set-Content`/`Out-File` defaults.
