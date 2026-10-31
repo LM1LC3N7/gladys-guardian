@@ -128,8 +128,11 @@ export const TIMINGS = {
   /** The check of a close kept: every 15 s; 5 s while the valve closes. */
   stopCheck: 15 * SECOND,
   stopWatch: 5 * SECOND,
-  /** A close sent again this many times (each answered) without effect is held. */
+  /** A close sent again this many times (each accepted) without effect is held: */
   stopResends: 3,
+  /** then sent again every 30 s, doubling to 10 min, forever (a new budget on a change). */
+  heldResendFirst: 30 * SECOND,
+  heldResendMax: 10 * MINUTE,
   /** /data: a save waits this long at most; on the path of a close, much less. */
   saveWait: 2 * SECOND,
   stopSaveWait: 200,

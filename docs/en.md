@@ -9,8 +9,11 @@ no Guardian cloud, straight on your network.
 > and the captures of its tests. A firmware update may change the API.
 
 > **The local API has no password.** Anyone on your network can open or
-> close the valve with it, with or without Gladys. Keep the controller on a
-> trusted network (no guest Wi-Fi, no port forwarding).
+> close the valve with it, with or without Gladys, and can forge its answers
+> just as easily (the leak, the valve state, the UID: UDP without any
+> authentication). The opening lock of Gladys and the confirmation "seen
+> closed" are no safer than your network. Keep the controller on a trusted
+> network (no guest Wi-Fi, no port forwarding).
 
 ## What you get
 
@@ -62,15 +65,26 @@ disk. It goes:
 - else to every configured address whose controller was never identified
   (the address you typed).
 
-It is sent at once, then every 250 ms for 3 seconds while the controller does
-not answer or answers that its valve is moving (it refuses any command while
-the valve moves). Then it is **kept** in `/data` and checked every 15 seconds
-(5 seconds while the valve closes), also after a restart, before Gladys even
-gives the configuration, until a read shows the valve **closed**. It is sent
-again while the valve stays open or in a fault. Each try that the controller
-accepted counts: after 3 of them without effect, it is held (no more tries
-until you click again) and the status asks you to check the valve. A silence,
-an unreachable controller or a "moving" answer never counts.
+It is sent at once. One try waits 1.2 s for the answer: after a silence it is
+sent again at once, after a "moving" answer (the controller refuses any
+command while its valve moves) 250 ms later, for 3 seconds. Then it is
+**kept** in `/data` and checked every 15 seconds (5 seconds while the valve
+closes), also after a restart, before Gladys even gives the configuration,
+until a read shows the valve **closed**. It is sent again while the valve
+stays open or in a fault: 3 times quickly (each accepted by the controller,
+2.4 s apart); then, held, every 30 seconds, then less and less often (10
+minutes apart at most), until the valve closes, and the status asks you to
+check the valve. A valve that changes (out of its fault, moved by hand), a
+controller that answers again after a silence (rebooted) or a restart of the
+integration gives 3 quick resends again. A silence, an unreachable controller
+or a "moving" answer never counts as a try.
+
+When another valve (another UID) answers at the address the close went to
+(addresses moved in the router), that other valve is closed too (the safe
+side), and the close of the valve you clicked is **kept**: it goes where that
+valve answers in this run, else to every configured address not identified
+in this run; if there is none, it waits (in `/data`, said in the status)
+until that valve answers at a configured address.
 
 The close is refused, nothing sent, in two cases only:
 
@@ -78,14 +92,16 @@ The close is refused, nothing sent, in two cases only:
 - every known address answers with another valve (another UID).
 
 A close kept is let go only when: a read shows the valve closed; an open
-clicked in Gladys (with the option) left; two reads in a row show the valve
-opened again after it was seen closing (opened from the app or the button of
-the controller); a read shows another controller at its address. Never by
-time.
+clicked in Gladys (with the option) left before that close was clicked;
+two reads in a row show the valve opened again after it was seen closing
+(opened from the app or the button of the controller). Never by time; never
+because another valve answers at its address (see above).
 
-Gladys gets its answer within 3.5 seconds: success when the valve reads
-closing or closed; otherwise the message says exactly what happened (sent
-without an answer, not sent yet, refused, moving), and the close stays kept.
+Gladys gets its answer within 3.5 seconds: success only when the read back
+read the valve you clicked (its UID), closing or closed; otherwise the
+message says exactly what happened (sent without an answer, not sent yet,
+refused, moving, another valve at that address, identity not read yet), and
+the close stays kept.
 
 ## Opening the valve (off by default)
 
@@ -97,13 +113,17 @@ on the values in memory) and refused when:
 - the valve moves, or is in a fault (stalled, motor spinning, halted, position
   unknown);
 - the onboard sensor reads a leak, or cannot be read;
-- a paired sensor that answers reads a leak (a sensor that does not answer
-  does not block);
+- a paired sensor reads a leak, or cannot be read in time (each one listed
+  is read; a sensor whose battery is dead blocks opening: remove it in the
+  Guardian app), or the list of the paired sensors cannot be read;
 - a close of that controller is being sent (a close clicked after an open
-  always wins: the open never leaves after it);
+  always wins: the open never leaves after it, and an open that already left
+  never lets that close go);
 - the option is turned off before the datagram leaves;
 - a close is kept for that valve and `/data` cannot be written (a restart
   would close it again);
+- `/data` is still being read (a close kept there could come back and close
+  the valve again);
 - the controller does not answer in time (nothing sent after 2.7 s).
 
 An open is confirmed only by a read back showing the valve opening or open;

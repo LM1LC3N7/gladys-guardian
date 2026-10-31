@@ -262,7 +262,7 @@ test('/data: repaired, bounded; a close never written has no try counted; future
     {
       host: '192.168.1.50',
       port: 7777,
-      uid: null,
+      uids: [],
       since: now,
       written: false,
       resends: 0,
@@ -271,12 +271,17 @@ test('/data: repaired, bounded; a close never written has no try counted; future
     {
       host: '192.168.1.51',
       port: 7777,
-      uid: null,
+      uids: [],
       since: now,
       written: true,
       resends: 0,
       seenApplied: true,
     },
   ]);
-  assert.deepEqual(normalizeMemory('garbage', now), { version: 1, controllers: [], stops: [] });
+  assert.deepEqual(normalizeMemory('garbage', now), {
+    version: 1,
+    controllers: [],
+    stops: [],
+    lost: [],
+  });
 });

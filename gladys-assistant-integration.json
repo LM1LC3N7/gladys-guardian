@@ -21,8 +21,8 @@
         "fr": "Votre contrôleur de vanne Guardian"
       },
       "description": {
-        "en": "Shows your Guardian valve controller (Elexa, GVC1) and the leak sensors paired with it in Gladys through its local API, without the Guardian cloud: valve state, leaks, temperatures, sensor batteries. Closing the valve always works from Gladys; opening it only if you allow it below. The local API has no password: anyone on your network can command the valve, keep it on a trusted network. Give the controller a fixed address in your router, enter it, save, then add the devices from the Discovery tab. Never tested with a real device. Not affiliated with Elexa.",
-        "fr": "Affiche votre contrôleur de vanne Guardian (Elexa, GVC1) et les détecteurs de fuite appairés dans Gladys par son API locale, sans le cloud Guardian : état de la vanne, fuites, températures, piles des détecteurs. Fermer la vanne marche toujours depuis Gladys ; l'ouvrir seulement si vous l'autorisez ci-dessous. L'API locale n'a pas de mot de passe : toute personne sur votre réseau peut commander la vanne, gardez-la sur un réseau de confiance. Donnez au contrôleur une adresse fixe dans votre box, saisissez-la, enregistrez, puis ajoutez les appareils depuis l'onglet Découverte. Jamais testé avec un vrai appareil. Sans lien avec Elexa."
+        "en": "Shows your Guardian valve controller (Elexa, GVC1) and the leak sensors paired with it in Gladys through its local API, without the Guardian cloud: valve state, leaks, temperatures, sensor batteries. Closing the valve always works from Gladys; opening it only if you allow it below. The local API has no password: anyone on your network can command the valve and forge its answers, keep it on a trusted network. Give the controller a fixed address in your router, enter it, save, then add the devices from the Discovery tab. Never tested with a real device. Not affiliated with Elexa.",
+        "fr": "Affiche votre contrôleur de vanne Guardian (Elexa, GVC1) et les détecteurs de fuite appairés dans Gladys par son API locale, sans le cloud Guardian : état de la vanne, fuites, températures, piles des détecteurs. Fermer la vanne marche toujours depuis Gladys ; l'ouvrir seulement si vous l'autorisez ci-dessous. L'API locale n'a pas de mot de passe : toute personne sur votre réseau peut commander la vanne et falsifier ses réponses, gardez-la sur un réseau de confiance. Donnez au contrôleur une adresse fixe dans votre box, saisissez-la, enregistrez, puis ajoutez les appareils depuis l'onglet Découverte. Jamais testé avec un vrai appareil. Sans lien avec Elexa."
       },
       "links": [
         {
@@ -67,8 +67,8 @@
         "fr": "Autoriser l'ouverture de la vanne"
       },
       "description": {
-        "en": "Off by default. On: the \"Open the valve\" button lets water in, after a fresh read shows the valve closed, still and no leak. Off: it refuses every command. Closing the valve always works.",
-        "fr": "Désactivé par défaut. Activé : le bouton « Ouvrir la vanne » laisse passer l'eau, après une lecture fraîche montrant la vanne fermée, immobile et sans fuite. Désactivé : il refuse toute commande. La fermeture marche toujours."
+        "en": "Off by default. On: the \"Open the valve\" button lets water in, after a fresh read shows the valve still (closed; or open while a close is kept, which the open then lets go), no leak on the controller nor on any paired sensor (each one read). Off: it refuses every command. Closing the valve always works.",
+        "fr": "Désactivé par défaut. Activé : le bouton « Ouvrir la vanne » laisse passer l'eau, après une lecture fraîche montrant la vanne immobile (fermée ; ou ouverte alors qu'une fermeture est gardée, que l'ouverture abandonne alors), sans fuite sur le contrôleur ni sur aucun détecteur appairé (chacun lu). Désactivé : il refuse toute commande. La fermeture marche toujours."
       },
       "required": false,
       "default": false

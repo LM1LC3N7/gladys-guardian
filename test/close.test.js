@@ -181,25 +181,71 @@ test('a close goes nowhere only when every known address holds another valve', a
   assert.match(ackError(outcome), /aucune adresse configurée/);
 });
 
-test('a close accepted but never applied: sent again 3 times, then held and said', async (t) => {
+test('a close accepted but never applied: 3 quick resends, then spaced ones forever, said', async (t) => {
   const { dev, press, advance, store, gladys } = await setup(t);
   // The controller answers "ok" but its valve never moves.
-  dev.forge.set(CLOSE, () => {
+  const stuck = () => {
     for (const timer of dev.moveTimers) dev.timers.clearTimeout(timer);
     dev.valve = 4;
     return { command: CLOSE, status: 'ok' };
-  });
+  };
+  dev.forge.set(CLOSE, stuck);
   await press('close');
-  await advance(2 * 60 * SECOND, 100);
-  assert.equal(dev.count(CLOSE), 4, 'the click and 3 resends');
-  assert.equal(store.data.stops.length, 1, 'kept, never let go by time');
+  await advance(15 * SECOND, 100);
+  assert.equal(dev.count(CLOSE), 4, 'the click and 3 quick resends');
   assert.equal(store.data.stops[0].resends, 3);
-  assert.match(statusText(gladys), /accepted 3 times but the valve does not close/);
-  await advance(5 * 60 * SECOND, SECOND);
-  assert.equal(dev.count(CLOSE), 4);
-  // A new click: tried again.
-  await press('close');
+  assert.match(
+    statusText(gladys),
+    /held, accepted 4 times but the valve does not close; sent again in/,
+  );
+  // Held: sent again after 30 s, 60 s, 120 s... never given up, never let go by time.
+  await advance(60 * SECOND, 100);
   assert.equal(dev.count(CLOSE), 5);
+  await advance(60 * SECOND, 100);
+  assert.equal(dev.count(CLOSE), 6);
+  await advance(60 * 60 * SECOND, SECOND);
+  const hourly = dev.count(CLOSE);
+  assert.ok(hourly >= 10 && hourly <= 14, `${hourly} closes in an hour (10 min apart at most)`);
+  assert.equal(store.data.stops.length, 1, 'kept, never let go by time');
+  // Repaired: the next spaced close closes it.
+  dev.forge.delete(CLOSE);
+  await advance(11 * 60 * SECOND, SECOND);
+  assert.equal(dev.valve, 8);
+  assert.equal(store.data.stops.length, 0);
+});
+
+test('a close held gets new quick resends when the valve changes or the controller comes back', async (t) => {
+  const { dev, press, advance, store } = await setup(t);
+  let stuckState = 4;
+  const stuck = () => {
+    for (const timer of dev.moveTimers) dev.timers.clearTimeout(timer);
+    dev.valve = stuckState;
+    return { command: CLOSE, status: 'ok' };
+  };
+  dev.forge.set(CLOSE, stuck);
+  await press('close');
+  await advance(15 * SECOND, 100);
+  assert.equal(dev.count(CLOSE), 4);
+  // The valve moves to a fault (read by the next check): a new budget.
+  stuckState = 10;
+  dev.valve = 10;
+  await advance(16 * SECOND, 100);
+  assert.ok(dev.count(CLOSE) >= 5, 'sent again at once after the change');
+  await advance(10 * SECOND, 100);
+  const afterChange = dev.count(CLOSE);
+  assert.ok(afterChange >= 6, `${afterChange}`);
+  await advance(2 * 60 * SECOND, SECOND);
+  // The controller reboots (silent), comes back open: a new budget again.
+  dev.silent = true;
+  await advance(40 * SECOND, SECOND);
+  const beforeBack = dev.count(CLOSE);
+  dev.silent = false;
+  dev.valve = 4;
+  dev.forge.delete(CLOSE);
+  await advance(20 * SECOND, 100);
+  assert.ok(dev.count(CLOSE) > beforeBack);
+  assert.equal(dev.valve, 8);
+  assert.equal(store.data.stops.length, 0);
 });
 
 test('opened elsewhere after it closed: let go after two reads in a row, never resent', async (t) => {

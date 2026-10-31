@@ -21,8 +21,11 @@ the notes of the version's GitHub Release.
   hold the valve back.
 - "Close the valve", never held back (no option, reads, an open in progress,
   the configuration not read, `/data` slow), kept in `/data` until seen
-  closed, never given up before it left, never let go by time.
+  closed, never given up before it left, never let go by time; held after 3
+  accepted resends without effect, then sent again less and less often;
+  following its valve (UID) when another valve answers at its address.
 - "Open the valve" behind "Allow opening the valve" (off by default), decided
-  on a fresh read, refused on a leak, a moving or faulty valve, or another
-  controller at the address.
+  on a fresh read of the valve and of every paired sensor, refused on a leak
+  or a sensor not read, a moving or faulty valve, or another controller at
+  the address.
 - "Test the connection" button, never reading sooner than the interval.

@@ -41,7 +41,9 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (GuardianApp)
   a switch.
 - **Close**: never behind an option, a read, a command, the configuration or
   `/data`; kept in `/data` until seen closed, checked every 15 s (5 s while it
-  closes), sent again 3 times at most once accepted, never let go by time.
+  closes), sent again 3 times quickly once accepted, then every 30 s doubling
+  to 10 min, forever (3 quick ones again on a change); a new guard per click;
+  another valve at the address never lets it go: it follows its valve (UID).
 
 ## Credits
 

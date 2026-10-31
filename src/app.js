@@ -140,6 +140,8 @@ const freshController = (address, configured) => ({
   checkDueAt: Infinity,
   checking: false,
   opening: false,
+  /** The last read or check of this controller had no answer (cleared by the next answer). */
+  silent: false,
   lastTestAt: -Infinity,
 });
 
@@ -168,6 +170,11 @@ export class GuardianApp {
     this.memoryLoaded = undefined;
     /** addressKey -> controller (configured, or kept for a close). */
     this.controllers = new Map();
+    /** uid -> the close of a valve found at no address yet (another valve answered). */
+    this.lost = new Map();
+    /** The write of /data in flight, and the next one (one waiting at most). */
+    this.writing = undefined;
+    this.nextWrite = undefined;
     this.generation = 0;
     this.started = false;
     this.configRead = false;
@@ -253,17 +260,21 @@ export class GuardianApp {
         }
         for (const kept of this.memory.stops) {
           const ctl = this.controllerAt(kept, { create: true });
-          if (ctl.guard) continue;
-          ctl.guard = this.newGuard(kept.uid);
+          const known = ctl.guard?.uids ?? [];
+          // A restart gives a close kept a new budget of resends.
+          ctl.guard = this.newGuard([...known, ...kept.uids], ctl.guard);
           ctl.guard.since = kept.since;
           ctl.guard.written = kept.written;
-          ctl.guard.resends = kept.resends;
           ctl.guard.seenApplied = kept.seenApplied;
           this.logger.warn(`Guardian: close kept in /data for ${ctl.addressText}: checked now`);
           this.armStopCheck(ctl, 0);
         }
+        for (const kept of this.memory.lost) {
+          if (!this.lost.has(kept.uid))
+            this.lost.set(kept.uid, { uid: kept.uid, since: kept.since });
+        }
         // A close clicked while /data loaded is kept with the others now.
-        if ([...this.controllers.values()].some((c) => c.guard)) {
+        if ([...this.controllers.values()].some((c) => c.guard) || this.lost.size > 0) {
           this.persist().catch(() => {});
         }
       })();
@@ -271,21 +282,39 @@ export class GuardianApp {
     return this.memoryLoaded;
   }
 
-  async saveMemory(wait = TIMINGS.saveWait) {
-    // Unreadable: never overwritten. Not loaded yet: never overwritten with a guess.
-    if (this.memoryUnreadable || !this.memoryReady) {
-      return false;
+  /**
+   * One write of /data in flight at most, and one waiting (it takes the
+   * memory of the moment it starts): a hung disk never piles writes up.
+   */
+  writeLatest() {
+    if (this.writing) {
+      this.nextWrite ??= this.writing.then(() => {
+        this.nextWrite = undefined;
+        return this.writeLatest();
+      });
+      return this.nextWrite;
     }
-    const saved = await this.bounded(
-      this.store.save(this.memory).then(
+    this.writing = this.store
+      .save(this.memory)
+      .then(
         () => true,
         (err) => {
           this.logger.warn(`Guardian: saving the state to /data failed: ${err.message}`);
           return false;
         },
-      ),
-      wait,
-    );
+      )
+      .finally(() => {
+        this.writing = undefined;
+      });
+    return this.writing;
+  }
+
+  async saveMemory(wait = TIMINGS.saveWait) {
+    // Unreadable: never overwritten. Not loaded yet: never overwritten with a guess.
+    if (this.memoryUnreadable || !this.memoryReady) {
+      return false;
+    }
+    const saved = await this.bounded(this.writeLatest(), wait);
     if (!saved.done) {
       this.logger.warn('Guardian: saving the state to /data takes too long: not awaited');
       return false;
@@ -311,17 +340,19 @@ export class GuardianApp {
     const stops = [];
     for (const ctl of this.controllers.values()) {
       const g = ctl.guard;
-      if (!g || ctl === without) continue;
+      // `without`: the guard an open lets go, out of /data before its datagram.
+      if (!g || g === without) continue;
       stops.push({
         ...ctl.address,
-        uid: g.uid,
+        uids: [...g.uids],
         since: g.since,
         written: g.written,
         resends: g.resends,
         seenApplied: g.seenApplied,
       });
     }
-    return normalizeMemory({ controllers, stops }, this.now());
+    const lost = [...this.lost.values()].map(({ uid, since }) => ({ uid, since }));
+    return normalizeMemory({ controllers, stops, lost }, this.now());
   }
 
   /** Writes /data (bounded: `wait`); resolves whether it was written. */
@@ -368,6 +399,8 @@ export class GuardianApp {
       this.stopController(ctl);
       if (ctl.checkTimer) this.timers.clearTimeout(ctl.checkTimer);
       ctl.checkTimer = undefined;
+      // Whatever holds a line ends now (each request is bounded anyway).
+      ctl.lane.holder?.controller.abort();
     }
     this.publisher.stop();
     await this.bounded(this.persist(2 * SECOND), 2 * SECOND);
@@ -397,6 +430,7 @@ export class GuardianApp {
     } catch (err) {
       this.logger.warn(`Guardian: reading the configuration failed: ${err.message}`);
       // The next try armed first: nothing below may hold it back.
+      if (this.stopped) return;
       this.configTimer = this.timers.setTimeout(() => {
         this.configTimer = undefined;
         this.onConnected(getConfig).catch(() => {});
@@ -425,6 +459,7 @@ export class GuardianApp {
    * values), without reading the controllers sooner than their interval.
    */
   async connected(raw = {}) {
+    if (this.stopped) return;
     this.configRead = true;
     if (!this.started) {
       this.started = true;
@@ -448,6 +483,7 @@ export class GuardianApp {
       // A newer configuration is waiting: this one is skipped.
       if (seq !== this.configSeq) return;
       this.configRead = true;
+      if (this.stopped) return;
       if (!this.started) {
         this.started = true;
         this.publisher.start();
@@ -479,6 +515,8 @@ export class GuardianApp {
       // armed again, never sooner than the interval after the last read.
       this.schedule(ctl, this.firstWait(ctl));
     }
+    // The closes of valves found nowhere try the addresses of this configuration.
+    this.retryLost();
     await this.publishAll();
   }
 
@@ -505,6 +543,9 @@ export class GuardianApp {
 
   schedule(ctl, delay = this.interval) {
     if (ctl.timer) this.timers.clearTimeout(ctl.timer);
+    ctl.timer = undefined;
+    // Stopped: never a timer armed again (it would keep the process alive).
+    if (this.stopped) return;
     const generation = this.generation;
     ctl.timer = this.timers.setTimeout(
       () => {
@@ -631,6 +672,9 @@ export class GuardianApp {
       ctl.keptUid = uid;
       this.persist(TIMINGS.stopSaveWait).catch(() => {});
     }
+    // The closes searched for this valve come here; a close kept here for
+    // another valve goes on where that valve is.
+    this.foundValve(ctl, uid);
   }
 
   /** Applies a valve state read by a request numbered `seq` (departure order). */
@@ -661,6 +705,7 @@ export class GuardianApp {
     ctl.online = true;
     ctl.error = undefined;
     ctl.readAt = ping.startedAt;
+    this.answered(ctl);
     this.observeStop(ctl, { uid, state }, status.seq, status.startedAt);
     // The valve at once: the secondary parts may take a while.
     await this.publishAll();
@@ -739,6 +784,7 @@ export class GuardianApp {
   /** A failed read: offline, its session identity unknown until the next ping. */
   failed(ctl, err) {
     ctl.online = false;
+    ctl.silent = true;
     ctl.uid = undefined;
     ctl.error = errorReason(err);
     this.logger.warn(`Guardian: ${ctl.addressText} not read (${ctl.error})`);
@@ -758,10 +804,12 @@ export class GuardianApp {
   /** The line of one close kept. */
   stopLine(ctl) {
     const g = ctl.guard;
-    const where = ctl.addressText;
+    const where = `${ctl.addressText} (${[...g.uids].join(', ')})`;
     if (ctl.stopJobs.length > 0 || ctl.stopWorker) return T.stopSending(where);
     if (!g.written) return T.stopNotSent(where, g.failure ?? 'waiting');
-    if (g.held) return T.stopHeld(where);
+    if (g.held) {
+      return T.stopHeld(where, g.accepted, age(Math.max(0, g.nextHeldAt - this.mono())));
+    }
     if (g.refused) return T.stopRefused(where, g.refused);
     if (g.closingSince !== undefined && this.mono() - g.closingSince >= TIMINGS.closingLong) {
       return T.stopClosingLong(where);
@@ -775,8 +823,12 @@ export class GuardianApp {
   status() {
     const notes = [];
     if (this.memoryUnreadable) notes.push(T.dataUnreadable);
+    else if (!this.memoryReady && this.memoryLoaded) notes.push(T.dataLoading);
     for (const ctl of this.controllers.values()) {
       if (ctl.guard) notes.push(this.stopLine(ctl));
+    }
+    for (const l of this.lost.values()) {
+      notes.push(T.stopLost(l.uid, l.where, l.other));
     }
     if (this.configFailed) {
       return [false, lines(T.configUnreadable, ...notes)];
@@ -1025,6 +1077,8 @@ export class GuardianApp {
   /** The checks before any request of an open, and again right before its datagram. */
   checkOpen(ctl, entry) {
     if (!this.config.allowOpen) throw this.refusal(ERRORS.openDisabled);
+    // /data not read yet: a close kept there may come back and close it again.
+    if (!this.memoryReady) throw this.refusal(ERRORS.dataLoading);
     if (entry.generation !== this.generation || !ctl.configured) {
       throw this.refusal(ERRORS.configChanged);
     }
@@ -1113,20 +1167,36 @@ export class GuardianApp {
     if (!ctl.onboard || ctl.onboard.seq < onboardRead.seq) {
       ctl.onboard = { ...onboard, seq: onboardRead.seq, at: onboardRead.startedAt };
     }
+    // Every paired sensor is read now: a leak anywhere keeps the valve closed,
+    // and a sensor that cannot be read (silent, refused, out of time) is
+    // unknown, so the open is refused (never "it does not answer, go").
+    if (ctl.pairedUids === undefined) throw this.refusal(ERRORS.sensorsUnknown);
     const wetSensors = [];
-    for (const sensorUid of ctl.pairedUids ?? []) {
-      if (this.mono() >= until) break;
+    const unread = [];
+    for (const sensorUid of ctl.pairedUids) {
+      if (this.mono() >= until) {
+        unread.push(sensorUid);
+        continue;
+      }
       try {
         const r = await get(CMD.SENSOR_STATUS, { uid: sensorUid });
         const reading = parseSensorStatus(r.answer);
-        if (reading.uid !== undefined && reading.uid !== sensorUid) continue;
-        if (reading.wet === true) wetSensors.push(sensorUid);
+        if (reading.uid !== undefined && reading.uid !== sensorUid) unread.push(sensorUid);
+        else if (reading.wet === true) wetSensors.push(sensorUid);
+        else if (reading.wet !== false) unread.push(sensorUid);
       } catch (err) {
         if (err?.kind === ERROR_KINDS.ABORTED || !(err instanceof GuardianError)) throw err;
-        // A sensor that does not answer never blocks an open (said in the docs).
+        unread.push(sensorUid);
       }
     }
-    return { state, wet: onboard.wet, wetSensors, startedAt: status.startedAt, seq: status.seq };
+    return {
+      state,
+      wet: onboard.wet,
+      wetSensors,
+      unread,
+      startedAt: status.startedAt,
+      seq: status.seq,
+    };
   }
 
   async openOnLine(ctl, entry) {
@@ -1160,6 +1230,7 @@ export class GuardianApp {
       if (fresh.wet === true) throw this.refusal(ERRORS.leakNow);
       if (fresh.wet !== false) throw this.refusal(ERRORS.leakUnknown);
       if (fresh.wetSensors.length > 0) throw this.refusal(ERRORS.leakSensor(fresh.wetSensors));
+      if (fresh.unread.length > 0) throw this.refusal(ERRORS.sensorUnread(fresh.unread));
       const { state } = fresh;
       if (state === undefined) throw this.refusal(ERRORS.stateUnknown('protocol'));
       if (VALVE.isMoving(state)) throw this.refusal(ERRORS.moving(valveText(state)));
@@ -1174,11 +1245,12 @@ export class GuardianApp {
       }
       if (ctl.guard) {
         // The close kept is let go by this open: in /data BEFORE the datagram,
-        // or nothing is sent (a restart would close the valve again).
-        if (!(await this.persist(TIMINGS.saveWait, { without: ctl }))) {
+        // or nothing is sent (a restart would close the valve again). Only
+        // this guard: a close clicked meanwhile is a new one, never let go here.
+        liftedGuard = ctl.guard;
+        if (!(await this.persist(TIMINGS.saveWait, { without: liftedGuard }))) {
           throw this.refusal(ERRORS.dataNotWritten);
         }
-        liftedGuard = ctl.guard;
       }
       // The deadline, the option and the closes again, right before the datagram.
       this.checkOpen(ctl, entry);
@@ -1204,8 +1276,9 @@ export class GuardianApp {
         }
       }
       // Left and accepted: the close kept is let go (a newer intent, clicked with the option).
-      if (liftedGuard && ctl.guard === liftedGuard) {
-        this.dropGuard(ctl, 'opened from Gladys');
+      if (liftedGuard) {
+        // dropGuard lets go this very guard only, never a newer one.
+        this.dropGuard(ctl, liftedGuard, 'opened from Gladys');
         liftedGuard = undefined;
       }
       this.followUp(ctl);
@@ -1263,8 +1336,8 @@ export class GuardianApp {
       throw this.refusal(ERRORS.openRefused(reason));
     }
     // Left, no answer: it may have been applied; the newer intent wins over a close kept.
-    if (liftedGuard && ctl.guard === liftedGuard) {
-      this.dropGuard(ctl, 'opened from Gladys (sent without an answer)');
+    if (liftedGuard) {
+      this.dropGuard(ctl, liftedGuard, 'opened from Gladys (sent without an answer)');
     }
     this.followUp(ctl);
     throw this.refusal(ERRORS.openSentUnconfirmed(reason));
@@ -1274,6 +1347,7 @@ export class GuardianApp {
   followUp(ctl) {
     for (const handle of ctl.followUps) this.timers.clearTimeout(handle);
     ctl.followUps.clear();
+    if (this.stopped) return;
     const generation = this.generation;
     for (const delay of TIMINGS.followUps) {
       const handle = this.timers.setTimeout(() => {
@@ -1294,9 +1368,10 @@ export class GuardianApp {
    * Where the close of valve `uid` goes: the controllers that answered `uid`
    * in this run; else those where /data last saw it (and nothing else since);
    * else every configured address whose controller was never identified.
+   * `except`: an address known (now) to hold another valve.
    */
-  stopTargets(uid) {
-    const all = [...this.controllers.values()];
+  stopTargets(uid, except) {
+    const all = [...this.controllers.values()].filter((c) => c !== except);
     const bySession = all.filter((c) => c.uid === uid);
     if (bySession.length > 0) return bySession;
     const byKept = all.filter((c) => c.uid === undefined && c.keptUid === uid);
@@ -1318,6 +1393,8 @@ export class GuardianApp {
         this.controllers.size === 0 ? ERRORS.closeNoAddress : ERRORS.closeElsewhere,
       );
     }
+    // A close clicked again for a valve searched for: it goes to the targets now.
+    this.lost.delete(uid);
     const jobs = targets.map((ctl) => this.queueStop(ctl, uid, received));
     let timer;
     const late = new Promise((resolve) => {
@@ -1326,7 +1403,9 @@ export class GuardianApp {
         Math.max(0, received + TIMINGS.commandAnswerBy - this.mono()),
       );
     });
-    const results = await Promise.all(jobs.map((job) => Promise.race([job.done, late])));
+    const results = await Promise.all(
+      jobs.map((job) => Promise.race([job.done.then((r) => r.get(uid)), late])),
+    );
     this.timers.clearTimeout(timer);
     const failures = results
       .map((result, i) =>
@@ -1334,10 +1413,12 @@ export class GuardianApp {
           ? jobs[i].written
             ? ERRORS.closeUnconfirmed(jobs[i].ctl.addressText)
             : ERRORS.closePending(jobs[i].ctl.addressText)
-          : result.error,
+          : result?.error,
       )
       .filter(Boolean);
-    if (failures.length > 0) {
+    // One target that read the valve clicked, closing or closed: the close is applied.
+    const confirmed = results.some((r) => r !== 'late' && r && !r.error);
+    if (!confirmed && failures.length > 0) {
       throw this.refusal(failures.reduce((a, b) => join(a, b)));
     }
     return undefined;
@@ -1349,10 +1430,10 @@ export class GuardianApp {
     ctl.protectSeq += 1;
     let job = ctl.stopJobs.find((j) => !j.running);
     if (job) {
-      job.uid = uid;
+      job.uids.add(uid);
       return job;
     }
-    job = { ctl, uid, received, written: false, running: false };
+    job = { ctl, uids: new Set([uid]), received, written: false, running: false };
     job.done = new Promise((resolve) => {
       job.resolve = resolve;
     });
@@ -1373,7 +1454,11 @@ export class GuardianApp {
           } catch (err) {
             this.logger.warn(`Guardian: close failed: ${err.message}`);
             for (const job of batch) {
-              job.resolve({ error: ERRORS.closePending(ctl.addressText) });
+              job.resolve(
+                new Map(
+                  [...job.uids].map((u) => [u, { error: ERRORS.closePending(ctl.addressText) }]),
+                ),
+              );
             }
           }
           ctl.stopJobs = ctl.stopJobs.filter((j) => !batch.includes(j));
@@ -1385,67 +1470,74 @@ export class GuardianApp {
     })();
   }
 
-  newGuard(uid) {
+  newGuard(uids, previous) {
     return {
-      uid: uid ?? null,
+      /** The valves whose close goes to this address. */
+      uids: new Set(uids),
+      /** The first of them (logs, older tools). */
+      get uid() {
+        return [...this.uids][0];
+      },
       since: this.now(),
       written: false,
       sentAt: undefined,
       sentSeq: undefined,
       resends: 0,
+      /** Every datagram the controller accepted for this close (said in the status). */
+      accepted: 0,
       seenApplied: false,
       contraReads: 0,
       closingSince: undefined,
       held: false,
+      heldState: undefined,
+      heldEvery: TIMINGS.heldResendFirst,
+      nextHeldAt: Infinity,
       refused: undefined,
       failure: undefined,
+      other: previous?.other,
     };
   }
 
-  /** The guard of a close clicked, renewed for this click (its resends from 0). */
-  prepareGuard(ctl, uid) {
-    if (!ctl.guard) {
-      ctl.guard = this.newGuard(uid);
-    }
-    const g = ctl.guard;
-    g.uid = uid ?? g.uid;
-    g.since = this.now();
-    g.resends = 0;
-    g.held = false;
-    g.refused = undefined;
-    g.seenApplied = false;
-    g.contraReads = 0;
-    g.closingSince = undefined;
-    return g;
+  /**
+   * The guard of a close clicked: a NEW object for each click (an open in
+   * flight that replaced the previous one can only let go that one), with
+   * the valves of the previous guard of this address and the new one.
+   */
+  prepareGuard(ctl, uids) {
+    const previous = ctl.guard;
+    ctl.guard = this.newGuard([...(previous?.uids ?? []), ...uids], previous);
+    return ctl.guard;
   }
 
-  /** The close datagram, on the line held; `onSent` right before it leaves. */
-  sendClose(ctl, holder, timeoutMs, beforeSend) {
+  /** The close datagram, on the line held; `beforeSend` right before it leaves. */
+  sendClose(ctl, holder, timeoutMs, guard, beforeSend) {
     return this.request(ctl, holder, CMD.VALVE_CLOSE, {
       timeoutMs,
       beforeSend: () => {
         beforeSend?.();
-        const g = ctl.guard;
-        if (g) {
-          g.written = true;
-          g.sentAt = this.mono();
-          g.sentSeq = ctl.seq + 1;
-          g.failure = undefined;
-        }
+        guard.written = true;
+        guard.sentAt = this.mono();
+        guard.sentSeq = ctl.seq + 1;
+        guard.failure = undefined;
       },
     });
   }
 
   /**
    * The close clicked on one controller: written at once (no read before),
-   * tried again every 250 ms for 3 s on a silence or a "moving" (the
-   * controller refuses any command while its valve moves); then one read
-   * back that alone confirms it. Not confirmed: kept (in /data) and checked.
+   * tried again every 250 ms on a "moving" (the controller refuses any
+   * command while its valve moves) or right away after a silence (one try
+   * waits 1.2 s), for 3 s; then one read back (identity and valve) that
+   * alone confirms it, for the valve clicked only. Not confirmed: kept (in
+   * /data) and checked.
    */
   async sendStop(ctl, jobs) {
     const received = Math.min(...jobs.map((j) => j.received));
     const answerBy = received + TIMINGS.commandAnswerBy;
-    const guard = this.prepareGuard(ctl, jobs[jobs.length - 1].uid);
+    const guard = this.prepareGuard(
+      ctl,
+      jobs.flatMap((j) => [...j.uids]),
+    );
     this.logger.info(`Guardian: close at ${ctl.addressText}`);
     // In /data before the first byte, so a restart sends it again; a save that
     // fails or hangs never holds the close back (200 ms at most).
@@ -1462,12 +1554,14 @@ export class GuardianApp {
         for (const job of ctl.stopJobs.filter((j) => !j.running)) {
           job.running = true;
           jobs.push(job);
+          for (const u of job.uids) guard.uids.add(u);
         }
         try {
           await this.sendClose(
             ctl,
             holder,
             Math.max(100, Math.min(TIMINGS.stopTry, answerBy - 200 - this.mono())),
+            guard,
             () => {
               for (const job of jobs) job.written = true;
             },
@@ -1494,6 +1588,7 @@ export class GuardianApp {
         if (accepted) {
           failure = undefined;
           guard.refused = undefined;
+          guard.accepted += 1;
           break;
         }
         if (this.mono() + TIMINGS.stopRetry >= retryUntil || this.stopped) break;
@@ -1505,8 +1600,7 @@ export class GuardianApp {
         if (left >= TIMINGS.commandMinRequest) {
           await this.sleep(Math.min(TIMINGS.applyWait, left - TIMINGS.commandMinRequest));
           try {
-            // The valve state alone: the time left goes to it (the checks read the identity too).
-            back = await this.readStopState(ctl, holder, answerBy - 100, { identity: false });
+            back = await this.readStopState(ctl, holder, answerBy - 100);
           } catch (err) {
             this.logger.debug(`Guardian: read back of the close failed (${errorReason(err)})`);
           }
@@ -1516,30 +1610,40 @@ export class GuardianApp {
       holder.release();
     }
     let decision;
+    const readUid = back?.read?.uid;
     if (back && ctl.guard === guard) {
       decision = this.decideStop(guard, back.read, back.seq, back.startedAt);
-      if (decision === 'done') this.dropGuard(ctl, 'closed');
-      else if (decision === 'other') this.dropGuard(ctl, 'another controller at its address');
+      if (decision === 'done') this.dropGuard(ctl, guard, 'closed');
+      else if (decision === 'other') this.misplaced(ctl, guard, readUid);
     }
-    let result;
+    const where = ctl.addressText;
+    // The answer of each valve clicked: a success only when the read back read
+    // that valve (its UID), closing or closed.
+    const resultFor = (uid) => {
+      if (decision === 'other' || (readUid && readUid !== uid)) {
+        return { error: ERRORS.closeOther(where, uid, readUid) };
+      }
+      if (decision === 'done' || (decision === 'watch' && guard.seenApplied)) {
+        return readUid === uid ? {} : { error: ERRORS.closeNotIdentified(where) };
+      }
+      if (failure && !accepted) {
+        if (guard.refused) return { error: ERRORS.closeRefused(where, guard.refused) };
+        if (busy) return { error: ERRORS.closeBusy(where) };
+        if (!jobs.some((j) => j.written)) {
+          return { error: ERRORS.closeNotSent(where, errorReason(failure)) };
+        }
+        return { error: ERRORS.closeNoAnswer(where) };
+      }
+      return { error: ERRORS.closeUnconfirmed(where) };
+    };
+    for (const job of jobs) {
+      job.resolve(new Map([...job.uids].map((u) => [u, resultFor(u)])));
+    }
     if (decision === 'done' || (decision === 'watch' && guard.seenApplied)) {
-      this.logger.info(`Guardian: close at ${ctl.addressText} confirmed`);
-      result = {};
-    } else if (decision === 'other') {
-      result = { error: ERRORS.closeOther(ctl.addressText) };
-    } else if (failure && !accepted) {
-      const where = ctl.addressText;
-      if (guard.refused) result = { error: ERRORS.closeRefused(where, guard.refused) };
-      else if (busy) result = { error: ERRORS.closeBusy(where) };
-      else if (!jobs.some((j) => j.written)) {
-        result = { error: ERRORS.closeNotSent(where, errorReason(failure)) };
-      } else result = { error: ERRORS.closeNoAnswer(where) };
-    } else {
-      result = { error: ERRORS.closeUnconfirmed(ctl.addressText) };
+      this.logger.info(`Guardian: close at ${where} confirmed (${readUid ?? 'identity not read'})`);
     }
-    for (const job of jobs) job.resolve(result);
     // Armed before /data is written, never awaited: a hung disk never stops the checks.
-    if (ctl.guard) {
+    if (ctl.guard === guard) {
       const next = !guard.written
         ? SECOND
         : guard.seenApplied
@@ -1548,32 +1652,34 @@ export class GuardianApp {
             ? Math.max(0, guard.sentAt + TIMINGS.stopApplyDelay - this.mono()) + TIMINGS.applyWait
             : TIMINGS.stopCheck;
       this.armStopCheck(ctl, next);
-      this.persist(TIMINGS.stopSaveWait).catch(() => {});
     }
+    this.persist(TIMINGS.stopSaveWait).catch(() => {});
     if (jobs.some((j) => j.written) && ctl.configured) this.followUp(ctl);
     this.publishAll().catch(() => {});
   }
 
   /** The identity and the valve state, on the line held, within `until`. */
-  async readStopState(ctl, holder, until, { identity = true } = {}) {
+  async readStopState(ctl, holder, until) {
     const timeoutMs = () =>
       Math.max(TIMINGS.commandMinRequest, Math.min(TIMINGS.readTimeout, until - this.mono()));
     const read = {};
     // The identity tells "another controller" apart; unreadable, it proves nothing.
-    if (identity)
-      try {
-        read.uid = parsePing(
-          (await this.request(ctl, holder, CMD.PING, { timeoutMs: timeoutMs() })).answer,
-        ).uid;
-      } catch (err) {
-        if (err?.kind === ERROR_KINDS.ABORTED) throw err;
-      }
+    try {
+      read.uid = parsePing(
+        (await this.request(ctl, holder, CMD.PING, { timeoutMs: timeoutMs() })).answer,
+      ).uid;
+    } catch (err) {
+      if (err?.kind === ERROR_KINDS.ABORTED) throw err;
+    }
+    if (read.uid) this.identify(ctl, read.uid);
     const startedAt = this.mono();
     const r = await this.request(ctl, holder, CMD.VALVE_STATUS, { timeoutMs: timeoutMs() });
     read.state = parseValveStatus(r.answer).state;
-    if ((read.uid ?? ctl.uid) && (read.uid ?? ctl.uid) === ctl.readingsUid) {
+    // Only the valve whose identity this run read at this address gets the state.
+    if (read.uid && read.uid === ctl.readingsUid) {
       this.applyValve(ctl, read.state, r.seq, startedAt);
     }
+    this.answered(ctl);
     return { read, seq: r.seq, startedAt };
   }
 
@@ -1581,14 +1687,14 @@ export class GuardianApp {
    * What a read says of a close kept: 'done' (closed), 'watch' (closing, or
    * opened once after it was seen closing), 'elsewhere' (opened twice in a
    * row after it was seen closing: opened by the app or the button), 'other'
-   * (another controller), 'stale' (the read left before the close), 'wait'
-   * (read too soon after the close left), 'resend' (still open, in a fault,
-   * or unreadable: sent again, in doubt), 'hold' (sent again 3 times, each
-   * accepted, without effect: held, said in the status, no more writes
-   * until a new click), 'send' (never left).
+   * (another valve answers at the address: the close goes on where its valve
+   * is), 'stale' (the read left before the close), 'wait' (read too soon
+   * after the close left), 'resend' (still open, in a fault, or unreadable:
+   * sent again, in doubt), 'hold' (3 resends accepted without effect: sent
+   * again on a slower cadence, `nextHeldAt`), 'send' (never left).
    */
   decideStop(guard, read, readSeq, readStartedAt) {
-    if (read?.uid && guard.uid && read.uid !== guard.uid) return 'other';
+    if (read?.uid && !guard.uids.has(read.uid)) return 'other';
     if (!guard.written) return 'send';
     if (readSeq !== undefined && guard.sentSeq !== undefined && readSeq < guard.sentSeq) {
       return 'stale';
@@ -1612,11 +1718,122 @@ export class GuardianApp {
     ) {
       return 'wait';
     }
+    if (guard.held && state !== undefined && state !== guard.heldState) {
+      // Something changed since it was held (out of the fault, moved by hand):
+      // a new budget of resends.
+      this.rearm(guard, 'the valve changed');
+    }
     if (guard.held || guard.resends >= TIMINGS.stopResends) {
-      guard.held = true;
+      if (!guard.held) {
+        guard.held = true;
+        guard.heldState = state;
+        guard.nextHeldAt = this.mono() + guard.heldEvery;
+      }
       return 'hold';
     }
     return 'resend';
+  }
+
+  /** A close held gets a new budget of resends (a change read, the controller back, a restart). */
+  rearm(guard, reason) {
+    if (!guard.held && guard.resends === 0) return;
+    guard.held = false;
+    guard.resends = 0;
+    guard.heldState = undefined;
+    guard.heldEvery = TIMINGS.heldResendFirst;
+    guard.nextHeldAt = Infinity;
+    this.logger.info(`Guardian: close held, tried again (${reason})`);
+  }
+
+  /** A controller answered: back after a silence, the closes held there get a new budget. */
+  answered(ctl) {
+    if (ctl.silent && ctl.guard) {
+      this.rearm(ctl.guard, 'the controller answers again');
+      this.armStopCheck(ctl, 0);
+    }
+    ctl.silent = false;
+  }
+
+  /**
+   * Another valve (`readUid`) answers where the close of `guard` went: the
+   * valves of the guard that are not this one are never let go: each goes
+   * where its valve answers in this run, else to the addresses never
+   * identified, else waits (in /data, said in the status) until its valve
+   * answers at a configured address.
+   */
+  misplaced(ctl, guard, readUid) {
+    if (ctl.guard !== guard || !readUid) return;
+    const away = [...guard.uids].filter((u) => u !== readUid);
+    if (away.length === 0) return;
+    this.logger.warn(
+      `Guardian: ${readUid} answers at ${ctl.addressText}, not ${away.join(', ')}: their close goes on elsewhere`,
+    );
+    if (guard.uids.has(readUid)) {
+      for (const u of away) guard.uids.delete(u);
+    } else {
+      this.dropGuard(ctl, guard, `another valve (${readUid}) at its address`);
+    }
+    for (const uid of away) this.relocate(uid, ctl, readUid, guard.since);
+  }
+
+  /**
+   * Where a close sent to the wrong valve goes now: where `uid` answers in
+   * this run, else every configured address not identified in this run
+   * (what /data says of them may be stale: addresses move), never `from`.
+   */
+  relocateTargets(uid, from) {
+    const all = [...this.controllers.values()].filter((c) => c !== from);
+    const bySession = all.filter((c) => c.uid === uid);
+    if (bySession.length > 0) return bySession;
+    return all.filter((c) => c.configured && c.uid === undefined);
+  }
+
+  /** Sends the close of `uid` where its valve is now, or keeps it until it is found. */
+  relocate(uid, from, readUid, since = this.now()) {
+    const targets = this.relocateTargets(uid, from);
+    if (targets.length === 0) {
+      const lost = this.lost.get(uid);
+      this.lost.set(uid, {
+        uid,
+        since: lost?.since ?? since,
+        where: from?.addressText,
+        other: readUid,
+      });
+      this.persist(TIMINGS.stopSaveWait).catch(() => {});
+      this.updateStatus().catch(() => {});
+      return;
+    }
+    this.lost.delete(uid);
+    for (const ctl of targets) {
+      const guard = this.prepareGuard(ctl, [uid]);
+      guard.since = Math.min(guard.since, since);
+      this.armStopCheck(ctl, 0);
+    }
+    this.persist(TIMINGS.stopSaveWait).catch(() => {});
+    this.updateStatus().catch(() => {});
+  }
+
+  /** A valve identified at a controller: the closes searched for it go there now. */
+  foundValve(ctl, uid) {
+    if (this.lost.has(uid)) {
+      const { since } = this.lost.get(uid);
+      this.lost.delete(uid);
+      const guard = this.prepareGuard(ctl, [uid]);
+      guard.since = Math.min(guard.since, since);
+      this.logger.warn(`Guardian: ${uid} found at ${ctl.addressText}: its close goes there`);
+      this.armStopCheck(ctl, 0);
+      this.persist(TIMINGS.stopSaveWait).catch(() => {});
+    }
+    // A close kept here for another valve: that valve is not here.
+    if (ctl.guard) this.misplaced(ctl, ctl.guard, uid);
+  }
+
+  /** The lost closes try the addresses again (a new configuration). */
+  retryLost() {
+    for (const { uid, since, where } of [...this.lost.values()]) {
+      const from = where ? this.controllers.get(where) : undefined;
+      if (this.relocateTargets(uid, from).length > 0) this.relocate(uid, from, undefined, since);
+    }
   }
 
   /** A poll read seen by the close kept: let go when it shows it applied, else checked now. */
@@ -1624,11 +1841,14 @@ export class GuardianApp {
     const g = ctl.guard;
     if (!g || ctl.stopWorker || ctl.checking) return;
     const decision = this.decideStop(g, read, readSeq, startedAt);
-    if (decision === 'done') this.dropGuard(ctl, 'closed');
-    else if (decision === 'other') this.dropGuard(ctl, 'another controller at its address');
-    else if (decision === 'elsewhere') this.dropGuard(ctl, 'opened elsewhere (read twice)');
+    if (decision === 'done') this.dropGuard(ctl, g, 'closed');
+    else if (decision === 'other') this.misplaced(ctl, g, read.uid);
+    else if (decision === 'elsewhere') this.dropGuard(ctl, g, 'opened elsewhere (read twice)');
     else if (decision === 'resend' || decision === 'send') this.armStopCheck(ctl, 0);
     else if (decision === 'watch') this.armStopCheck(ctl, TIMINGS.stopWatch);
+    else if (decision === 'hold') {
+      this.armStopCheck(ctl, Math.max(0, Math.min(TIMINGS.stopCheck, g.nextHeldAt - this.mono())));
+    }
   }
 
   checkMustYield(ctl) {
@@ -1639,8 +1859,9 @@ export class GuardianApp {
    * The periodic check of the close kept on one controller. Never written:
    * sent first, without a read (a close that never left is never given up).
    * Then the identity and the valve are read, and the close is sent again
-   * when `decideStop` says so. It gives its turn to a click or an open
-   * (tried again a second later), checked once more right before each write.
+   * when `decideStop` says so (a close held: on its slower cadence). It
+   * gives its turn to a click or an open (tried again a second later),
+   * checked once more right before each write.
    */
   async runCheck(ctl) {
     const guard = ctl.guard;
@@ -1657,7 +1878,7 @@ export class GuardianApp {
     const send = async () => {
       const wasWritten = guard.written;
       try {
-        await this.sendClose(ctl, holder, TIMINGS.readTimeout, () => {
+        await this.sendClose(ctl, holder, TIMINGS.readTimeout, guard, () => {
           if (this.checkMustYield(ctl) || ctl.guard !== guard) {
             throw new Error('a click or an open');
           }
@@ -1666,7 +1887,9 @@ export class GuardianApp {
         written = true;
         // Accepted by the valve: a resend (a refusal or a silence is not one).
         if (wasWritten) guard.resends += 1;
+        guard.accepted += 1;
         guard.refused = undefined;
+        this.answered(ctl);
         next = TIMINGS.stopApplyDelay + TIMINGS.applyWait;
       } catch (err) {
         if (err?.beforeSend) {
@@ -1676,14 +1899,18 @@ export class GuardianApp {
         if (err?.kind === ERROR_KINDS.ABORTED) throw err;
         if (err?.kind === ERROR_KINDS.DEVICE && err.code === DEVICE_ERRORS.ALREADY_CLOSED) {
           written = true;
+          this.answered(ctl);
           next = TIMINGS.applyWait;
         } else if (err?.kind === ERROR_KINDS.DEVICE && err.code === DEVICE_ERRORS.MOVING) {
+          this.answered(ctl);
           next = 2 * SECOND;
         } else if (answered(err)) {
+          this.answered(ctl);
           guard.refused = errorReason(err);
           guard.sentAt = undefined;
-        } else if (!guard.written) {
-          guard.failure = errorReason(err);
+        } else {
+          ctl.silent = true;
+          if (!guard.written) guard.failure = errorReason(err);
         }
       }
     };
@@ -1700,17 +1927,28 @@ export class GuardianApp {
         } catch (err) {
           if (err?.kind === ERROR_KINDS.ABORTED) throw err;
           // Nothing readable: sent again, in doubt (the close is the safe side).
+          ctl.silent = true;
           back = { read: undefined, seq: undefined, startedAt: this.mono() };
         }
         if (ctl.guard === guard) {
           const decision = this.decideStop(guard, back.read, back.seq, back.startedAt);
-          if (decision === 'done') this.dropGuard(ctl, 'closed');
-          else if (decision === 'other') this.dropGuard(ctl, 'another controller at its address');
-          else if (decision === 'elsewhere') this.dropGuard(ctl, 'opened elsewhere (read twice)');
-          else if (decision === 'watch') next = TIMINGS.stopWatch;
+          if (decision === 'done') this.dropGuard(ctl, guard, 'closed');
+          else if (decision === 'other') this.misplaced(ctl, guard, back.read.uid);
+          else if (decision === 'elsewhere') {
+            this.dropGuard(ctl, guard, 'opened elsewhere (read twice)');
+          } else if (decision === 'watch') next = TIMINGS.stopWatch;
           else if (decision === 'wait') {
             next = Math.max(0, guard.sentAt + TIMINGS.stopApplyDelay - this.mono()) + 1;
           } else if (decision === 'resend') await send();
+          else if (decision === 'hold') {
+            if (this.mono() >= guard.nextHeldAt) {
+              // Held: sent again on a slower cadence (30 s, doubling to 10 min), forever.
+              await send();
+              guard.heldEvery = Math.min(TIMINGS.heldResendMax, guard.heldEvery * 2);
+              guard.nextHeldAt = this.mono() + guard.heldEvery;
+            }
+            next = Math.max(0, Math.min(TIMINGS.stopCheck, guard.nextHeldAt - this.mono()));
+          }
         }
       }
     } catch (err) {
@@ -1730,8 +1968,9 @@ export class GuardianApp {
     this.updateStatus().catch(() => {});
   }
 
-  dropGuard(ctl, reason) {
-    if (!ctl.guard) return;
+  /** Lets go `guard` only: a newer guard of the address (a newer click) stays. */
+  dropGuard(ctl, guard, reason) {
+    if (!ctl.guard || ctl.guard !== guard) return;
     ctl.guard = undefined;
     this.logger.info(`Guardian: close at ${ctl.addressText} let go (${reason})`);
     if (ctl.checkTimer) {

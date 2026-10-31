@@ -177,11 +177,20 @@ export const T = {
       `Close at ${where}: refused by the controller (${reason}); sent again at each check.`,
       `Fermeture vers ${where} : refusée par le contrôleur (${reason}) ; renvoyée à chaque vérification.`,
     ),
-  stopHeld: (where) =>
+  stopHeld: (where, accepted, next) =>
     both(
-      `Close at ${where}: accepted 3 times but the valve does not close: no more tries until a new click. Check the valve.`,
-      `Fermeture vers ${where} : acceptée 3 fois mais la vanne ne se ferme pas : plus d'essai avant un nouveau clic. Vérifiez la vanne.`,
+      `Close at ${where}: held, accepted ${accepted} times but the valve does not close; sent again in ${next.en}, then less and less often (10 min at most), until it closes. Check the valve.`,
+      `Fermeture vers ${where} : retenue, acceptée ${accepted} fois mais la vanne ne se ferme pas ; renvoyée dans ${next.fr}, puis de plus en plus espacée (10 min au plus), jusqu'à la fermeture. Vérifiez la vanne.`,
     ),
+  stopLost: (uid, where, other) =>
+    both(
+      `Close of valve ${uid}: not found${where ? ` at ${where}` : ''}${other ? ` (${other} answers there)` : ''}; kept, sent as soon as ${uid} answers at a configured address.`,
+      `Fermeture de la vanne ${uid} : introuvable${where ? ` à ${where}` : ''}${other ? ` (${other} y répond)` : ''} ; gardée, envoyée dès que ${uid} répond à une adresse configurée.`,
+    ),
+  dataLoading: both(
+    '/data/guardian-state.json is still being read: opening the valve waits for it (a close kept there may come back).',
+    "/data/guardian-state.json est encore en lecture : l'ouverture de la vanne l'attend (une fermeture qui y est gardée peut revenir).",
+  ),
 };
 
 export const ERRORS = {
@@ -306,9 +315,27 @@ export const ERRORS = {
       `Close refused by the controller at ${where} (${reason}): kept, sent again.`,
       `Fermeture refusée par le contrôleur ${where} (${reason}) : gardée, renvoyée.`,
     ),
-  closeOther: (where) =>
+  closeOther: (where, uid, other) =>
     both(
-      `Another valve answers at ${where}: this one is not there.`,
-      `Une autre vanne répond à ${where} : celle-ci n'y est pas.`,
+      `Close sent to ${where}, but valve ${other ?? '?'} answers there, not ${uid}: ${uid} is kept and its close goes where it answers.`,
+      `Fermeture envoyée vers ${where}, mais c'est la vanne ${other ?? '?'} qui y répond, pas ${uid} : ${uid} est gardée et sa fermeture part là où elle répond.`,
     ),
+  closeNotIdentified: (where) =>
+    both(
+      `Close sent to ${where} and the valve there closes, but its identity could not be read yet: kept, checked again.`,
+      `Fermeture envoyée vers ${where} et la vanne y se ferme, mais son identité n'a pas encore pu être lue : gardée, revérifiée.`,
+    ),
+  dataLoading: both(
+    '/data is still being read (a close kept there may come back): nothing sent.',
+    '/data est encore en lecture (une fermeture qui y est gardée pourrait revenir) : rien envoyé.',
+  ),
+  sensorUnread: (uids) =>
+    both(
+      `Leak sensor ${list(uids)} could not be read in time: the valve stays closed.`,
+      `Le détecteur ${list(uids)} n'a pas pu être lu à temps : la vanne reste fermée.`,
+    ),
+  sensorsUnknown: both(
+    'The list of the paired leak sensors cannot be read: nothing sent.',
+    'La liste des détecteurs de fuite appairés ne peut pas être lue : rien envoyé.',
+  ),
 };

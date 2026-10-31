@@ -46,6 +46,43 @@ up to date at the end of every milestone.
 
 ## Decisions
 
+- **Review r1 (2026-10-31)**:
+  - B1: `prepareGuard` makes a NEW guard object for each click; an open lets
+    go only the guard it removed from `/data` (`dropGuard(ctl, guard)`
+    compares objects), never one clicked after it.
+  - B2: a guard holds the set of UIDs whose close goes to its address (a job
+    too: two valves fanned out to one address keep both). A read showing
+    another UID never lets a close go: `misplaced` keeps the right UIDs and
+    `relocate` sends the others where they answer in this run, else to every
+    configured address not identified in this run (what /data says may be
+    stale after a DHCP swap); with no target, `lost` (in /data, said) until
+    the valve answers at a configured address (`foundValve` on each
+    identity read) or a new configuration offers an address. The read back
+    of a click reads the identity: success only for the UID read.
+  - I1: the fresh read of an open reads every listed sensor; one not read
+    (silence, refusal, out of time, `wet` not a boolean) or an unknown list
+    refuses the open. A dead sensor blocks opening (said in the docs).
+  - I2: held after 3 accepted resends, then sent again every 30 s doubling
+    to 10 min, forever; 3 quick resends again when a read shows another
+    state than at the hold, when the controller answers after a silence, and
+    at a restart (resends not restored from /data).
+  - I3: a test per mutant listed (`test/review1.test.js`); m23, m31, m42
+    rewritten for the new code (relocation, refusal not counted, state
+    without identity never applied).
+  - Mutants r2: the reviewer's 53 (anchors moved: m01, m14, m18, m21, m23,
+    m31, m41, m42 rewritten) and 16 new ones on B1, B2, I1, I2, m1, m2, one
+    at a time: all killed but the equivalents the review admitted (m19, m35,
+    m50, m51, m52) and m03/m04/m16 (each doubled by the other).
+  - s04 of the review checked the old "held for good": with I2, a held close
+    is sent again (30 s, doubling) and re-armed by a restart, so its checks
+    "never closed without a new click" and "held said after a restart" now
+    fail by design.
+  - No timer is armed again after `shutdown()` (schedule, follow-ups,
+    `getConfig` retry, checks; holders aborted): a test proves none is left.
+  - Minor: an open is refused while /data is still being read (status line);
+    one /data write in flight and one waiting at most; docs (close timing,
+    the open option, B1/B2/I1, forged answers on the LAN).
+
 - **Mutants (milestone 1)**: 36 mutants on the guards, run one at a time;
   32 killed, 4 equivalent, kept as defence in depth: the `protectSeq` test
   of `checkOpen` (a close always aborts the open's line or is still running
@@ -65,16 +102,16 @@ up to date at the end of every milestone.
   this run, else where `/data` last saw it, else every configured address
   whose controller was never identified ("owner unknown": the address typed).
   Refused unsent only when no address is known, or every known address holds
-  another UID.
+  another UID. Another UID read there: see r1 B2 (relocated, never dropped).
 - **"Moving" (error 20)** is not a try: the controller refuses any command
   while the valve moves; the close is retried every 250 ms for 3 s, then by
   the checks (every 2 s while it says "moving").
 - **"Already closed" (error 18)** is an accepted close; **"already open"
   (17)** an accepted open.
 - **Resends**: only a close the controller accepted counts; 3 without effect
-  hold it (no more writes until a new click), said in the status. A refusal
-  by the controller (another error code) is never counted: sent again at
-  each check.
+  hold it: sent again on a slower cadence (30 s doubling to 10 min), said in
+  the status. A refusal by the controller (another error code) is never
+  counted: sent again at each check.
 - **Opened elsewhere**: after the close was seen closing, two reads in a row
   showing it opening or open let it go (the app or the button of the
   controller); one read alone never does.
@@ -85,9 +122,8 @@ up to date at the end of every milestone.
   or silent) lets the close go; one refused or never sent keeps it.
 - **/data save before an open** only when a close is kept (that is what the
   save protects); otherwise nothing to guard.
-- **Leak before an open**: the onboard sensor must read dry (unreadable
-  refuses); paired sensors that answer must read dry, a silent one does not
-  block (a dead sensor would block the valve for good).
+- **Leak before an open**: the onboard sensor and every paired sensor must
+  read dry in the fresh read (unreadable refuses; r1 I1).
 - **The click's read back** reads the valve state only (the identity is read
   by the checks), so that a controller answering in 900 ms still fits in the
   3.5 s of the answer; one close try lasts 1.2 s at most.

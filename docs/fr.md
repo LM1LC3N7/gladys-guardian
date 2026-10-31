@@ -9,9 +9,12 @@ Affiche votre **contrôleur de vanne Guardian** (Elexa, GVC1) et les
 > l'API.
 
 > **L'API locale n'a pas de mot de passe.** Toute personne sur votre réseau
-> peut ouvrir ou fermer la vanne avec, avec ou sans Gladys. Gardez le
-> contrôleur sur un réseau de confiance (pas de Wi-Fi invité, pas de
-> redirection de port).
+> peut ouvrir ou fermer la vanne avec, avec ou sans Gladys, et peut tout
+> aussi facilement falsifier ses réponses (la fuite, l'état de la vanne,
+> l'UID : de l'UDP sans aucune authentification). Le verrou d'ouverture de
+> Gladys et la confirmation « vue fermée » ne sont pas plus sûrs que votre
+> réseau. Gardez le contrôleur sur un réseau de confiance (pas de Wi-Fi
+> invité, pas de redirection de port).
 
 ## Ce que vous obtenez
 
@@ -65,16 +68,29 @@ encore lue, ni disque lent. Il part :
 - sinon vers chaque adresse configurée dont le contrôleur n'a jamais été
   identifié (l'adresse que vous avez saisie).
 
-Il est envoyé tout de suite, puis toutes les 250 ms pendant 3 secondes tant
-que le contrôleur ne répond pas ou répond que sa vanne bouge (il refuse toute
-commande pendant un mouvement). Il est ensuite **gardé** dans `/data` et
-revérifié toutes les 15 secondes (5 secondes pendant la fermeture), même après
-un redémarrage, avant même que Gladys donne la configuration, jusqu'à ce
-qu'une lecture montre la vanne **fermée**. Il est renvoyé tant que la vanne
-reste ouverte ou en défaut. Chaque essai accepté par le contrôleur compte :
-après 3 sans effet, il est retenu (plus d'essai avant un nouveau clic) et le
-statut demande de vérifier la vanne. Un silence, un contrôleur injoignable ou
-une réponse « en mouvement » ne comptent pas.
+Il est envoyé tout de suite. Un essai attend sa réponse 1,2 s : après un
+silence il est renvoyé aussitôt, après une réponse « en mouvement » (le
+contrôleur refuse toute commande pendant un mouvement) 250 ms plus tard,
+pendant 3 secondes. Il est ensuite **gardé** dans `/data` et revérifié toutes
+les 15 secondes (5 secondes pendant la fermeture), même après un redémarrage,
+avant même que Gladys donne la configuration, jusqu'à ce qu'une lecture
+montre la vanne **fermée**. Il est renvoyé tant que la vanne reste ouverte ou
+en défaut : 3 fois rapidement (chaque envoi accepté par le contrôleur, à
+2,4 s d'intervalle) ; puis, retenu, toutes les 30 secondes, puis de plus en
+plus espacé (10 minutes au plus), jusqu'à la fermeture, et le statut demande
+de vérifier la vanne. Une vanne qui change (sortie de défaut, bougée à la
+main), un contrôleur qui répond de nouveau après un silence (redémarré) ou un
+redémarrage de l'intégration redonnent 3 renvois rapides. Un silence, un
+contrôleur injoignable ou une réponse « en mouvement » ne comptent jamais
+comme essai.
+
+Quand une autre vanne (un autre UID) répond à l'adresse où la fermeture est
+partie (adresses changées par la box), cette autre vanne se ferme aussi (le
+côté sûr), et la fermeture de la vanne demandée est **gardée** : elle part là
+où cette vanne répond depuis le démarrage, sinon vers chaque adresse
+configurée pas encore identifiée depuis le démarrage ; s'il n'y en a aucune,
+elle attend (dans `/data`, dit dans le statut) que cette vanne réponde à une
+adresse configurée.
 
 La fermeture est refusée, rien envoyé, dans deux cas seulement :
 
@@ -82,15 +98,17 @@ La fermeture est refusée, rien envoyé, dans deux cas seulement :
 - chaque adresse connue répond avec une autre vanne (un autre UID).
 
 Une fermeture gardée est abandonnée seulement quand : une lecture montre la
-vanne fermée ; une ouverture demandée dans Gladys (avec l'option) est partie ;
-deux lectures de suite montrent la vanne rouverte après l'avoir vue se fermer
-(ouverte depuis l'application ou le bouton du contrôleur) ; une lecture montre
-un autre contrôleur à son adresse. Jamais par le temps.
+vanne fermée ; une ouverture demandée dans Gladys (avec l'option) est partie
+avant que cette fermeture soit demandée ; deux lectures de suite montrent la
+vanne rouverte après l'avoir vue se fermer (ouverte depuis l'application ou le
+bouton du contrôleur). Jamais par le temps ; jamais parce qu'une autre vanne
+répond à son adresse (voir plus haut).
 
-Gladys reçoit sa réponse en 3,5 secondes au plus : succès quand la vanne se lit
-en fermeture ou fermée ; sinon le message dit exactement ce qui s'est passé
-(envoyée sans réponse, pas encore envoyée, refusée, en mouvement), et la
-fermeture reste gardée.
+Gladys reçoit sa réponse en 3,5 secondes au plus : succès seulement si la
+relecture a lu la vanne demandée (son UID), en fermeture ou fermée ; sinon le
+message dit exactement ce qui s'est passé (envoyée sans réponse, pas encore
+envoyée, refusée, en mouvement, autre vanne à cette adresse, identité pas
+encore lue), et la fermeture reste gardée.
 
 ## Ouvrir la vanne (désactivé par défaut)
 
@@ -102,13 +120,18 @@ refuse alors toute commande. Activé, une ouverture est décidée sur une
 - la vanne bouge, ou est en défaut (bloquée, moteur libre, arrêtée à
   mi-course, position inconnue) ;
 - le capteur intégré détecte une fuite, ou ne peut pas être lu ;
-- un détecteur appairé qui répond détecte une fuite (un détecteur qui ne
-  répond pas ne bloque pas) ;
+- un détecteur appairé détecte une fuite, ou ne peut pas être lu à temps
+  (chaque détecteur listé est lu ; un détecteur à la pile vide bloque
+  l'ouverture : retirez-le dans l'application Guardian), ou la liste des
+  détecteurs appairés ne peut pas être lue ;
 - une fermeture de ce contrôleur est en cours d'envoi (une fermeture demandée
-  après une ouverture gagne toujours : l'ouverture ne part jamais après elle) ;
+  après une ouverture gagne toujours : l'ouverture ne part jamais après elle,
+  et une ouverture déjà partie n'abandonne jamais cette fermeture) ;
 - l'option est désactivée avant le départ du datagramme ;
 - une fermeture est gardée pour cette vanne et `/data` ne peut pas être écrit
   (un redémarrage la refermerait) ;
+- `/data` est encore en lecture (une fermeture qui y est gardée pourrait
+  revenir et refermer la vanne) ;
 - le contrôleur ne répond pas à temps (rien envoyé après 2,7 s).
 
 Une ouverture n'est confirmée que par une relecture montrant la vanne en

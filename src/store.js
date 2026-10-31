@@ -6,9 +6,11 @@
 //     the controller does not answer) and the time of its last read (written
 //     at most once a minute, BEFORE the read: a restart never reads sooner
 //     than the interval);
-//   - `stops`: the closes not seen applied (address, UID of the valve clicked,
-//     since, written, resends, seen applied): a restart sends them again at
-//     once, without the configuration.
+//   - `stops`: the closes not seen applied (address, UIDs of the valves
+//     clicked, since, written, resends, seen applied): a restart sends them
+//     again at once, without the configuration;
+//   - `lost`: the closes of valves another valve answered for at the address
+//     they went to, kept until their valve answers at a configured address.
 // No secret (there is none), no personal data. The file is the container
 // user's only (0600), bounded (64 KiB) and repaired when read. A file that
 // cannot be read is not an empty one: `load()` says so, and the app then
@@ -145,9 +147,15 @@ function normalizeStop(raw, now) {
   // NTP not there yet) or none keeps the stop, dated now.
   const since = Number.isFinite(raw.since) && raw.since <= now ? raw.since : now;
   const written = raw.written === true;
+  // The valves whose close goes to this address (`uid` alone in older files).
+  const uids = [];
+  for (const u of Array.isArray(raw.uids) ? raw.uids.slice(0, 16) : [raw.uid]) {
+    const uid = normalizeUid(u);
+    if (uid && !uids.includes(uid)) uids.push(uid);
+  }
   return {
     ...address,
-    uid: normalizeUid(raw.uid) ?? null,
+    uids,
     since,
     written,
     // Never written: no resend can have been counted (a close that never left
@@ -181,9 +189,22 @@ export function normalizeMemory(raw, now) {
     const s = normalizeStop(entry, now);
     if (s && !stops.some((k) => sameAddress(k, s))) stops.push(s);
   }
+  // The closes of valves found at no address yet (another valve answered where
+  // they were sent): kept until their valve answers somewhere.
+  const lost = [];
+  for (const entry of Array.isArray(data.lost) ? data.lost.slice(0, 64) : []) {
+    const uid = normalizeUid(entry?.uid);
+    if (uid && !lost.some((l) => l.uid === uid)) {
+      lost.push({
+        uid,
+        since: Number.isFinite(entry.since) && entry.since <= now ? entry.since : now,
+      });
+    }
+  }
   return {
     version: 1,
     controllers: controllers.slice(-LIMITS.keptControllers),
     stops: stops.slice(0, LIMITS.keptControllers),
+    lost: lost.slice(0, LIMITS.keptControllers),
   };
 }

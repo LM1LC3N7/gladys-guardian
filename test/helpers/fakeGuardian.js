@@ -57,6 +57,10 @@ export function fakeGuardian({
     lose: new Set(),
     /** command -> error_code answered instead (the command not applied). */
     refuse: new Map(),
+    /** command -> extra ms before its answer. */
+    delay: new Map(),
+    /** command -> ms between the request and its datagram (a DNS lookup, connect). */
+    preSend: new Map(),
     /** command -> function(answer) -> answer: to forge an answer. */
     forge: new Map(),
     /** Every request received: { command, params }. */
@@ -171,6 +175,9 @@ export function network({ timers = globalThis } = {}) {
     async exchange({ host, port, command, params, timeoutMs, signal, beforeSend }) {
       if (signal?.aborted) throw new GuardianError(ERROR_KINDS.ABORTED, 'Aborted');
       const dev = net.devices.get(`${host}:${port}`);
+      const pre = dev?.preSend.get(command) ?? 0;
+      if (pre > 0) await new Promise((resolve) => timers.setTimeout(resolve, pre));
+      if (signal?.aborted) throw new GuardianError(ERROR_KINDS.ABORTED, 'Aborted');
       try {
         beforeSend?.();
       } catch (err) {
@@ -202,19 +209,22 @@ export function network({ timers = globalThis } = {}) {
           if (!dev || dev.silent || dev.lose.has(command)) return;
           // Received (and applied) as it leaves; answered after the latency.
           const answer = dev.handle(command, params);
-          late = timers.setTimeout(() => {
-            if (signal?.aborted) return;
-            if (!answer || dev.dropAnswers.has(command)) return;
-            if (answer.command !== command) return;
-            if (answer.status === 'ok') resolve(answer);
-            else
-              fail(
-                new GuardianError(ERROR_KINDS.DEVICE, 'Refused by the controller', {
-                  sent,
-                  code: answer.error_code,
-                }),
-              );
-          }, dev.latencyMs);
+          late = timers.setTimeout(
+            () => {
+              if (signal?.aborted) return;
+              if (!answer || dev.dropAnswers.has(command)) return;
+              if (answer.command !== command) return;
+              if (answer.status === 'ok') resolve(answer);
+              else
+                fail(
+                  new GuardianError(ERROR_KINDS.DEVICE, 'Refused by the controller', {
+                    sent,
+                    code: answer.error_code,
+                  }),
+                );
+            },
+            dev.latencyMs + (dev.delay.get(command) ?? 0),
+          );
         });
       } finally {
         timers.clearTimeout(timer);

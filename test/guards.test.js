@@ -214,7 +214,7 @@ test('a close kept that never left: its first datagram is never counted as a res
     return { command: CLOSE, status: 'ok' };
   });
   const s = await setup(t, { clock, net, dev, store, create: false });
-  await s.advance(3 * 60 * SECOND, 100);
+  await s.advance(15 * SECOND, 100);
   assert.equal(dev.count(CLOSE), 4, 'the first send and 3 resends');
   assert.equal(store.data.stops[0].resends, 3);
 });
@@ -246,7 +246,7 @@ test('an identity that cannot be read: not a Guardian, nothing published', async
 
 test('decideStop: a read that left before the close never judges it', async (t) => {
   const s = await setup(t);
-  const guard = s.app.newGuard(UID);
+  const guard = s.app.newGuard([UID]);
   guard.written = true;
   guard.sentSeq = 10;
   guard.sentAt = 0;
@@ -257,7 +257,7 @@ test('decideStop: a read that left before the close never judges it', async (t) 
 test('a poll read lets a close go when it reads it opened elsewhere a second time', async (t) => {
   const s = await setup(t);
   const ctl = s.app.controllers.get(HOST);
-  ctl.guard = s.app.newGuard(UID);
+  ctl.guard = s.app.newGuard([UID]);
   Object.assign(ctl.guard, { written: true, sentSeq: 1, sentAt: 0, seenApplied: true });
   s.app.observeStop(ctl, { uid: UID, state: 4 }, 100, 1e9);
   assert.ok(ctl.guard);
