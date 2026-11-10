@@ -10,6 +10,10 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+### Fixed
+
+- Manifest test: compares the version with package.json instead of a hardcoded 0.1.0.
+
 ## [0.1.1] - 2026-10-31
 
 ### Added

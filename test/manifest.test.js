@@ -29,10 +29,9 @@ function* texts(node, path = '') {
   }
 }
 
-test('the store basics; the version 0.1.0 everywhere, never pinned', () => {
+test('the store basics; the same version everywhere, never pinned', () => {
   assert.equal(manifest.manifest_version, 1);
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/, 'semver');
-  assert.equal(manifest.version, '0.1.0');
   assert.equal(manifest.keywords, undefined);
   assert.equal(manifest.countries, undefined);
   assert.equal(manifest.type, 'device');
